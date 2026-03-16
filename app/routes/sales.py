@@ -71,7 +71,8 @@ def _parse_sale_payload(data, is_update=False):
                 errors.append(f"'{num_field}' must be a number.")
 
     # Datetimes
-    for dt_field in ("sale_date", "confirmation_datetime", "shipment_deadline", "shipment_date"):
+    for dt_field in ("sale_date", "confirmation_datetime", "shipment_deadline",
+                     "shipment_date", "attention_needed_deadline"):
         if dt_field in data and data[dt_field] is not None:
             try:
                 parsed[dt_field] = datetime.fromisoformat(str(data[dt_field]))
@@ -422,6 +423,9 @@ def transition_sale_status(sale_id):
                 sale.discount_offered = float(data["discount_offered"])
             except (ValueError, TypeError):
                 pass
+        # Set 48-hour auto-discount deadline (Spec §3.3.4)
+        from datetime import timedelta
+        sale.attention_needed_deadline = datetime.utcnow() + timedelta(hours=48)
 
     # Consigned
     elif new_status == "Consigned":

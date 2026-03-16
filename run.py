@@ -4,6 +4,11 @@ Run with: python run.py
 """
 
 import os
+import sys
+
+# Ensure the project root is on the Python path (fixes Windows / direct invocation)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from app import create_app, db
 
 config_name = os.getenv("FLASK_ENV", "development")

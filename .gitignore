@@ -40,3 +40,4 @@ htmlcov/
 # Distribution
 *.tar.gz
 *.whl
+*.example

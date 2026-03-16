@@ -79,8 +79,9 @@ class Sale(db.Model):
         nullable=False,
         default="Pending",
     )  # Pending | Confirmed | Shipped | Completed | Cancelled | Attention Needed | Consigned | Returned
-    issue_type              = db.Column(db.String(255), nullable=True)
-    discount_offered        = db.Column(db.Numeric(10, 2), nullable=True)   # USD
+    issue_type                  = db.Column(db.String(255), nullable=True)
+    attention_needed_deadline   = db.Column(db.DateTime, nullable=True)     # 48-hr auto-discount timer
+    discount_offered            = db.Column(db.Numeric(10, 2), nullable=True)   # USD
     confirmation_datetime   = db.Column(db.DateTime, nullable=True)
     shipment_deadline       = db.Column(db.DateTime, nullable=True)
     pickup_address          = db.Column(db.Text, nullable=True)
@@ -125,6 +126,7 @@ class Sale(db.Model):
             "sale_date": self.sale_date.isoformat() if self.sale_date else None,
             "status": self.status,
             "issue_type": self.issue_type,
+            "attention_needed_deadline": self.attention_needed_deadline.isoformat() if self.attention_needed_deadline else None,
             "discount_offered": float(self.discount_offered) if self.discount_offered else None,
             "confirmation_datetime": self.confirmation_datetime.isoformat() if self.confirmation_datetime else None,
             "shipment_deadline": self.shipment_deadline.isoformat() if self.shipment_deadline else None,
