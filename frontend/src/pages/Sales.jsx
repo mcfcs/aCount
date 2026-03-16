@@ -20,6 +20,18 @@ function formatDate(dateStr) {
   try { return new Date(dateStr).toLocaleDateString('en-PH') } catch { return dateStr }
 }
 
+const SALE_TYPE_STYLES = {
+  Regular:     'bg-gray-100 text-gray-600',
+  FilledOffer: 'bg-indigo-100 text-indigo-700',
+  Consignment: 'bg-teal-100 text-teal-700',
+}
+
+const SALE_TYPE_LABELS = {
+  Regular:     'Regular',
+  FilledOffer: 'Offer',
+  Consignment: 'Consignment',
+}
+
 const STATUS_STYLES = {
   Pending:          'bg-gray-100 text-gray-600',
   Confirmed:        'bg-blue-100 text-blue-700',
@@ -152,7 +164,7 @@ export default function Sales() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    {['Order #', 'Shoe Name', 'SKU', 'Size', 'Status', 'Selling Price', 'Amount Made', 'Sale Date', 'Inventory Match'].map(col => (
+                    {['Order #', 'Shoe Name', 'Type', 'SKU', 'Size', 'Status', 'Selling Price', 'Amount Made', 'Sale Date', 'Inventory Match'].map(col => (
                       <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">
                         {col}
                       </th>
@@ -167,6 +179,13 @@ export default function Sales() {
                       </td>
                       <td className="px-4 py-3 font-medium text-gray-900 max-w-xs truncate">
                         {sale.shoe_name || sale.name || '—'}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {sale.sale_type ? (
+                          <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${SALE_TYPE_STYLES[sale.sale_type] || 'bg-gray-100 text-gray-600'}`}>
+                            {SALE_TYPE_LABELS[sale.sale_type] || sale.sale_type}
+                          </span>
+                        ) : '—'}
                       </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap">
                         {sale.sku || '—'}

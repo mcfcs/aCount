@@ -137,9 +137,14 @@ def parse_sale_notification(subject: str, body: str) -> dict:
     if order_match:
         result["order_number"] = int(order_match.group(1))
 
-    # Detect consignment sale (auto-confirmed, no separate Confirmation email)
-    if re.search(r'\bconsigned\b', subject, re.IGNORECASE):
-        result["is_consigned"] = True
+    # Determine sale type: Regular | FilledOffer | Consignment
+    subject_lower = subject.lower()
+    if "consigned" in subject_lower:
+        result["sale_type"] = "Consignment"
+    elif "filled an offer" in subject_lower or "start packaging" in subject_lower:
+        result["sale_type"] = "FilledOffer"
+    else:
+        result["sale_type"] = "Regular"
 
     # Shoe name: line after "Name:" OR from subject
     name_match = re.search(r'Name:\s*(.+)', body, re.IGNORECASE)
@@ -352,7 +357,11 @@ def _parse_transfer_date(date_str: str) -> datetime | None:
 def parse_attention_needed(subject: str, body: str) -> dict:
     """
     Spec 3.3.4 — Extract attention needed fields.
-    Returns dict with: order_number, issue_type
+    Returns dict with: order_number, issue_type, buyer_declined
+
+    Two variants:
+      - Standard: item issue discovered, discount offered to buyer (48hr timer)
+      - Buyer declined: buyer rejected discount, order cancelled, seller chooses Consign/Return
     """
     result = {}
 
@@ -360,7 +369,14 @@ def parse_attention_needed(subject: str, body: str) -> dict:
     if order_match:
         result["order_number"] = int(order_match.group(1))
 
-    # Issue type: text after "discovered the following issue(s):"
+    # Buyer-declined variant: "the buyer declined the discount"
+    body_lower = body.lower()
+    if "buyer declined" in body_lower or "buyer declined the discount" in body_lower:
+        result["buyer_declined"] = True
+        return result
+
+    # Standard variant: issue discovered, discount offered
+    result["buyer_declined"] = False
     issue_match = re.search(
         r'discovered the following issue(?:s)?:\s*\n?\s*(.+?)(?:\n|$)',
         body, re.IGNORECASE

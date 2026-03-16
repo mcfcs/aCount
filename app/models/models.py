@@ -66,6 +66,7 @@ class Sale(db.Model):
     order_number            = db.Column(db.BigInteger, nullable=False)
     parent_order_number     = db.Column(db.BigInteger, nullable=True)
     platform                = db.Column(db.String(100), nullable=False, default="Alias")
+    sale_type               = db.Column(db.String(20), nullable=True)   # Regular | FilledOffer | Consignment
     sku                     = db.Column(db.String(100), nullable=False)
     shoe_name               = db.Column(db.String(500), nullable=False)
     size                    = db.Column(db.Float, nullable=False)
@@ -116,6 +117,7 @@ class Sale(db.Model):
             "order_number": self.order_number,
             "parent_order_number": self.parent_order_number,
             "platform": self.platform,
+            "sale_type": self.sale_type,
             "sku": self.sku,
             "shoe_name": self.shoe_name,
             "size": self.size,

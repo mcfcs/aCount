@@ -124,7 +124,7 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_
     elif email_type == "BankTransfer":
         data = parsers.parse_bank_transfer(subject, body)
         parsed_data.update(data)
-        return _handle_bank_transfer(data)
+        return _handle_bank_transfer(data, sent_at=sent_at)
 
     elif email_type in ("Purchase", "Receipt", "Subscription", "Other"):
         logger.info(f"Email type '{email_type}' received — not yet implemented.")
@@ -151,7 +151,8 @@ def _handle_sale(data: dict, sent_at=None):
         return "Sale", existing_sale.sale_id
 
     # Consignment sales are auto-confirmed by Alias — no separate Confirmation email arrives
-    initial_status = "Confirmed" if data.get("is_consigned") else "Pending"
+    sale_type = data.get("sale_type", "Regular")
+    initial_status = "Confirmed" if sale_type == "Consignment" else "Pending"
 
     sale = Sale(
         order_number=order_number,
@@ -164,6 +165,7 @@ def _handle_sale(data: dict, sent_at=None):
         amount_made=data.get("amount_made"),
         sale_date=sent_at or datetime.utcnow(),
         status=initial_status,
+        sale_type=sale_type,
         inventory_match_status="Unmatched",
         platform="Alias",
     )
@@ -184,6 +186,12 @@ def _handle_sale(data: dict, sent_at=None):
             sale.inventory_match_status = "Matched"
             logger.info(f"FIFO matched sale #{order_number} → inventory_id={matched.inventory_id}")
 
+    # Same-day emails (Sale + Confirmation/Completed) may arrive out of order.
+    # If those emails were processed before this Sale was created, back-fill them now.
+    _apply_deferred_confirmation(sale, order_number)
+    if sale_type == "Consignment":
+        _apply_deferred_completion(sale, order_number)
+
     db.session.commit()
     logger.info(f"Created Sale #{order_number} (sale_id={sale.sale_id})")
     return "Sale", sale.sale_id
@@ -192,13 +200,20 @@ def _handle_sale(data: dict, sent_at=None):
 def _handle_confirmation(data: dict):
     """
     Spec 4.2 step 20: Update sale to Confirmed, store deadline + pickup info.
+    Never downgrades a sale that has already moved past Confirmed.
     """
     sale = _find_sale(data.get("order_number"))
     if not sale:
         return None
 
-    sale.status = "Confirmed"
-    sale.confirmation_datetime = datetime.utcnow()
+    _STATUS_ORDER = ["Pending", "Confirmed", "Shipped", "Completed"]
+    current_rank = _STATUS_ORDER.index(sale.status) if sale.status in _STATUS_ORDER else -1
+    confirmed_rank = _STATUS_ORDER.index("Confirmed")
+    if current_rank < confirmed_rank:
+        sale.status = "Confirmed"
+
+    # Always update pickup/deadline fields regardless of status (re-scrape safe)
+    sale.confirmation_datetime = sale.confirmation_datetime or datetime.utcnow()
     if data.get("shipment_deadline"):
         sale.shipment_deadline = data["shipment_deadline"]
     if data.get("pickup_address"):
@@ -209,31 +224,33 @@ def _handle_confirmation(data: dict):
         sale.amount_made = data["amount_made"]
 
     db.session.commit()
-    logger.info(f"Sale #{data.get('order_number')} → Confirmed")
+    logger.info(f"Sale #{data.get('order_number')} → Confirmed (was {sale.status})")
     return "Sale", sale.sale_id
 
 
 def _handle_shipped(data: dict):
-    """Spec 4.2 step 21: Update sale to Shipped."""
+    """Spec 4.2 step 21: Update sale to Shipped. Never downgrades."""
     sale = _find_sale(data.get("order_number"))
     if not sale:
         return None
 
-    sale.status = "Shipped"
-    sale.shipment_date = datetime.utcnow()
+    if sale.status not in ("Completed", "Shipped", "Cancelled", "Returned"):
+        sale.status = "Shipped"
+        sale.shipment_date = sale.shipment_date or datetime.utcnow()
+
     db.session.commit()
     logger.info(f"Sale #{data.get('order_number')} → Shipped")
     return "Sale", sale.sale_id
 
 
 def _handle_completed(data: dict):
-    """Spec 4.2 step 22: Update sale to Completed."""
+    """Spec 4.2 step 22: Update sale to Completed. Always applies (terminal forward state)."""
     sale = _find_sale(data.get("order_number"))
     if not sale:
         return None
 
     sale.status = "Completed"
-    sale.completion_date = datetime.utcnow().date()
+    sale.completion_date = sale.completion_date or datetime.utcnow().date()
     if data.get("amount_made"):
         sale.amount_made = data["amount_made"]
 
@@ -244,23 +261,32 @@ def _handle_completed(data: dict):
 
 def _handle_attention_needed(data: dict):
     """
-    Spec 4.4: Branch by issue type.
+    Spec 4.4: Two Attention Needed variants.
 
-    Path A — Used Product / Authentication Issue:
-        Update to Attention Needed; set 48-hour auto-discount deadline.
-        Awaits BuyerAccepted or cancellation (buyer declined).
+    Variant 1 — Buyer Declined (second email):
+        "the buyer declined the discount" → order already cancelled by Alias.
+        Seller must choose Consign or Return. Triggers buyer-declined flow.
 
-    Path B — Wrong Size / SKU:
-        Auto-consign inventory; cancel original sale.
-        New order # comes from subsequent email.
-
-    Path C — Mold:
-        Cancel immediately; create fee placeholder; restore inventory.
+    Variant 2 — Standard (first email, issue discovered):
+        Path A — Used Product / Auth Issue: set Attention Needed + 48hr deadline.
+        Path B — Wrong Size / SKU: auto-consign + cancel.
+        Path C — Mold: cancel immediately + fee placeholder.
     """
     sale = _find_sale(data.get("order_number"))
     if not sale:
         return None
 
+    # Variant 1 — Buyer declined the offered discount; order cancelled by Alias
+    if data.get("buyer_declined"):
+        sale.status = "Cancelled"
+        sale.cancellation_date = datetime.utcnow().date()
+        sale.cancellation_type = "Attention Needed"
+        _restore_inventory(sale)
+        db.session.commit()
+        logger.info(f"Sale #{sale.order_number} → Cancelled (buyer declined discount)")
+        return "Sale", sale.sale_id
+
+    # Variant 2 — Standard attention needed
     issue_type = (data.get("issue_type") or "").lower()
     sale.issue_type = data.get("issue_type")
 
@@ -336,15 +362,20 @@ def _handle_cancellation(data: dict):
 
     Path A (Unconfirmed) — no fee.
     Path B (Confirmed)   — create $10 expense record.
-    Path C (Attention Needed / Buyer Declined) — new order# = original + 1.
+
+    Note: Buyer-declined cancellations are now handled directly by the
+    second Attention Needed email ("buyer declined the discount") before
+    any Cancellation email arrives. If this handler finds an already-
+    Cancelled sale, skip gracefully.
     """
     sale = _find_sale(data.get("order_number"))
     if not sale:
         return None
 
-    # Path C — Buyer declined discount after Attention Needed (Spec §2.1.3, §4.4)
-    if sale.status == "Attention Needed":
-        return _handle_buyer_declined(sale)
+    # Already cancelled (e.g. buyer-declined Attention Needed email processed first)
+    if sale.status == "Cancelled":
+        logger.info(f"Sale #{data.get('order_number')} already Cancelled — skipping.")
+        return "Sale", sale.sale_id
 
     cancellation_type = data.get("cancellation_type", "Unconfirmed")
     fee_amount = data.get("fee_amount")
@@ -418,19 +449,36 @@ def _handle_buyer_declined(sale: Sale):
     return "Sale", sale.sale_id
 
 
-def _handle_bank_transfer(data: dict):
+def _handle_bank_transfer(data: dict, sent_at=None):
     """
     Spec 4.5: Create BankTransfer record; auto-reconcile if possible.
+    Uses the email's sent date as transfer_date (most reliable).
+    Skips creation if a transfer with the same amount + date already exists (dedup).
     """
     amount_php = data.get("amount_php")
     if not amount_php:
         raise ValueError("Could not parse amount_php from bank transfer email.")
 
+    # Use email sent date as the canonical transfer date
+    transfer_date = sent_at or data.get("transfer_date") or datetime.utcnow()
+
+    # Dedup: skip if a transfer with the same amount on the same day already exists
+    existing = BankTransfer.query.filter(
+        BankTransfer.amount_php == amount_php,
+        db.func.date(BankTransfer.transfer_date) == transfer_date.date(),
+    ).first()
+    if existing:
+        logger.info(
+            f"BankTransfer for ₱{amount_php} on {transfer_date.date()} already exists "
+            f"(transfer_id={existing.transfer_id}) — skipping."
+        )
+        return "BankTransfer", existing.transfer_id
+
     transfer = BankTransfer(
         amount_php=amount_php,
         bank_name=data.get("bank_name", "Unknown"),
         account_last4=data.get("account_last4", "0000"),
-        transfer_date=data.get("transfer_date", datetime.utcnow()),
+        transfer_date=transfer_date,
         reconciliation_status="Unreconciled",
     )
     db.session.add(transfer)
@@ -495,6 +543,72 @@ def _auto_reconcile_transfer(transfer: BankTransfer):
 # =============================================================================
 # Helpers
 # =============================================================================
+
+def _apply_deferred_confirmation(sale: Sale, order_number: int):
+    """
+    If a Confirmation email was processed before the Sale notification (same-day
+    ordering), its log entry exists with linked_record_id=None. Apply it now.
+    """
+    try:
+        deferred_logs = (
+            EmailProcessingLog.query
+            .filter_by(email_type="Confirmation", linked_record_id=None)
+            .all()
+        )
+        for log in deferred_logs:
+            if log.parsed_data and log.parsed_data.get("order_number") == order_number:
+                data = log.parsed_data
+                sale.status = "Confirmed"
+                sale.confirmation_datetime = sale.confirmation_datetime or datetime.utcnow()
+                if data.get("shipment_deadline"):
+                    try:
+                        sale.shipment_deadline = datetime.fromisoformat(data["shipment_deadline"])
+                    except (ValueError, TypeError):
+                        pass
+                if data.get("pickup_address"):
+                    sale.pickup_address = data["pickup_address"]
+                if data.get("pickup_window"):
+                    sale.pickup_window = data["pickup_window"]
+                if data.get("amount_made"):
+                    sale.amount_made = float(data["amount_made"])
+                log.linked_record_id = sale.sale_id
+                log.linked_record_type = "Sale"
+                logger.info(f"Applied deferred confirmation to #{order_number}")
+                break
+    except Exception as e:
+        logger.warning(f"Could not apply deferred confirmation for #{order_number}: {e}")
+
+
+def _apply_deferred_completion(sale: Sale, order_number: int):
+    """
+    If a Completed email was processed before the Sale notification (same-day
+    ordering issue), its log entry exists with linked_record_id=None.
+    Find it and apply the completion data to the just-created sale.
+    """
+    try:
+        deferred_logs = (
+            EmailProcessingLog.query
+            .filter_by(email_type="Completed", linked_record_id=None)
+            .all()
+        )
+        for log in deferred_logs:
+            if log.parsed_data and log.parsed_data.get("order_number") == order_number:
+                amount_made = log.parsed_data.get("amount_made")
+                sale.status = "Completed"
+                sale.completion_date = datetime.utcnow().date()
+                if amount_made:
+                    sale.amount_made = float(amount_made)
+                # Link the log entry now that the sale exists
+                log.linked_record_id = sale.sale_id
+                log.linked_record_type = "Sale"
+                logger.info(
+                    f"Applied deferred completion to consignment #{order_number} "
+                    f"(amount_made={amount_made})"
+                )
+                break
+    except Exception as e:
+        logger.warning(f"Could not apply deferred completion for #{order_number}: {e}")
+
 
 def _find_sale(order_number: int | None) -> Sale | None:
     if not order_number:

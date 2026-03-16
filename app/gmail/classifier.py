@@ -91,6 +91,10 @@ def _classify_alias(subject: str, body: str) -> str:
     if "has been canceled" in subject or "has been cancelled" in subject:
         return "Cancelled"
 
+    # "Bank Transfer Initiated" — ignore, only process Completed
+    if "bank transfer initiated" in subject:
+        return "Other"
+
     # "Bank Transfer Completed"
     if "bank transfer completed" in subject:
         return "BankTransfer"
