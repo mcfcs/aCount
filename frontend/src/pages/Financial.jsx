@@ -6,6 +6,7 @@ import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
 import { exportToCsv } from '../utils/csv'
+import { usePhpEstimateRate, formatPhpRate } from '../utils/exchangeRate'
 import {
   getBankTransfers, getBankTransfersSummary, createBankTransfer, updateBankTransfer,
   getExpenses, getExpensesSummary, createExpense, updateExpense, deleteExpense, deleteBankTransfer,
@@ -64,6 +65,7 @@ function BankTransfersTab() {
   const [form, setForm] = useState(EMPTY_TRANSFER)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
+  const phpRate = usePhpEstimateRate()
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -151,10 +153,11 @@ function BankTransfersTab() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KPICard label="Total Received" value={formatPHP(totalReceived)} />
         <KPICard label="Reconciled" value={transfers.filter(t => t.reconciliation_status === 'Reconciled').length} valueClassName="text-green-600" />
         <KPICard label="Unreconciled" value={transfers.filter(t => t.reconciliation_status === 'Unreconciled').length} valueClassName="text-red-600" />
+        <KPICard label="USD→PHP (est.)" value={formatPhpRate(phpRate)} />
       </div>
 
         <div className="flex justify-end">

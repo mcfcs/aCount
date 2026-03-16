@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import time
+import copy
 import threading
 from datetime import datetime
 
@@ -22,6 +23,42 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".poll_state.json")
 ALIAS_SENDER = "info@alias.org"
+
+_SCRAPE_STATUS_LOCK = threading.Lock()
+_SCRAPE_STATUS = {
+    "running": False,
+    "after": None,
+    "before": None,
+    "force": False,
+    "cancelling": False,
+    "total_fetched": 0,
+    "processed": 0,
+    "skipped": 0,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
+_SCRAPE_CANCEL_EVENT = threading.Event()
+
+
+def _set_scrape_status(update: dict):
+    with _SCRAPE_STATUS_LOCK:
+        _SCRAPE_STATUS.update(update)
+
+
+def get_scrape_status() -> dict:
+    with _SCRAPE_STATUS_LOCK:
+        return copy.copy(_SCRAPE_STATUS)
+
+
+def cancel_scrape() -> dict:
+    with _SCRAPE_STATUS_LOCK:
+        if not _SCRAPE_STATUS["running"]:
+            return {"status": "not_running", "message": "No scrape is currently running."}
+
+        _SCRAPE_CANCEL_EVENT.set()
+        _SCRAPE_STATUS["cancelling"] = True
+        return {"status": "cancelling", "message": "Scrape cancel requested."}
 
 
 # =============================================================================
@@ -217,6 +254,23 @@ def fetch_date_range(service, after: str, before: str = None, max_results: int =
 
 
 def scrape_date_range(app, after: str, before: str = None, force: bool = False) -> dict:
+    return _scrape_date_range_internal(
+        app=app,
+        after=after,
+        before=before,
+        force=force,
+        progress_cb=None,
+    )
+
+
+def _scrape_date_range_internal(
+    app,
+    after: str,
+    before: str = None,
+    force: bool = False,
+    progress_cb=None,
+    cancel_event=None,
+) -> dict:
     """
     Fetch and process all alias.org emails in a date range.
     force=True deletes existing EmailProcessingLog entries so messages are re-processed.
@@ -254,6 +308,17 @@ def scrape_date_range(app, after: str, before: str = None, force: bool = False) 
         results = []
 
         for msg_id in message_ids:
+            if cancel_event is not None and cancel_event.is_set():
+                return {
+                    "status": "cancelled",
+                    "error": "Scrape cancelled by user.",
+                    "after": after,
+                    "before": before,
+                    "total_fetched": len(message_ids),
+                    "processed": processed,
+                    "skipped": skipped,
+                    "results": results,
+                }
             try:
                 full_msg = service.users().messages().get(
                     userId="me", id=msg_id, format="full"
@@ -277,6 +342,8 @@ def scrape_date_range(app, after: str, before: str = None, force: bool = False) 
 
             except Exception as e:
                 logger.exception(f"Error processing message {msg_id}: {e}")
+            if progress_cb:
+                progress_cb(processed, skipped, len(message_ids))
 
         logger.info(f"Scrape complete: {processed} processed, {skipped} skipped.")
         return {
@@ -289,6 +356,73 @@ def scrape_date_range(app, after: str, before: str = None, force: bool = False) 
             "results": results,
         }
 
+
+def start_scrape_date_range(app, after: str, before: str = None, force: bool = False) -> bool:
+    with _SCRAPE_STATUS_LOCK:
+        if _SCRAPE_STATUS["running"]:
+            return False
+
+        _SCRAPE_CANCEL_EVENT.clear()
+        _SCRAPE_STATUS["running"] = True
+        _SCRAPE_STATUS["after"] = after
+        _SCRAPE_STATUS["before"] = before
+        _SCRAPE_STATUS["force"] = bool(force)
+        _SCRAPE_STATUS["cancelling"] = False
+        _SCRAPE_STATUS["total_fetched"] = 0
+        _SCRAPE_STATUS["processed"] = 0
+        _SCRAPE_STATUS["skipped"] = 0
+        _SCRAPE_STATUS["error"] = None
+        _SCRAPE_STATUS["started_at"] = datetime.utcnow().isoformat()
+        _SCRAPE_STATUS["finished_at"] = None
+
+    def _worker():
+        try:
+            result = _scrape_date_range_internal(
+                app=app,
+                after=after,
+                before=before,
+                force=force,
+                progress_cb=lambda processed, skipped, total_fetched: _set_scrape_status({
+                    "processed": processed,
+                    "skipped": skipped,
+                    "total_fetched": total_fetched,
+                }),
+                cancel_event=_SCRAPE_CANCEL_EVENT,
+            )
+            if result.get("status") == "cancelled":
+                _set_scrape_status({
+                    "running": False,
+                    "cancelling": False,
+                    "error": result.get("error"),
+                    "processed": result.get("processed", 0),
+                    "skipped": result.get("skipped", 0),
+                    "total_fetched": result.get("total_fetched", 0),
+                    "finished_at": datetime.utcnow().isoformat(),
+                })
+                return
+
+            _set_scrape_status({
+                "running": False,
+                "processed": result.get("processed", 0),
+                "skipped": result.get("skipped", 0),
+                "total_fetched": result.get("total_fetched", 0),
+                "error": result.get("error"),
+                "finished_at": datetime.utcnow().isoformat(),
+            })
+        except Exception as exc:
+            _set_scrape_status({
+                "running": False,
+                "error": str(exc),
+                "finished_at": datetime.utcnow().isoformat(),
+            })
+
+    thread = threading.Thread(
+        target=_worker,
+        daemon=True,
+        name="gmail-scrape",
+    )
+    thread.start()
+    return True
 
 # =============================================================================
 # Background polling thread

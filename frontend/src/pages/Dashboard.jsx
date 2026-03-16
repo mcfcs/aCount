@@ -7,6 +7,7 @@ import RecentActivity from '../components/dashboard/RecentActivity'
 import SalesByStatus from '../components/dashboard/SalesByStatus'
 import ProfitOverTime from '../components/dashboard/ProfitOverTime'
 import { getDashboardSummary, getDashboardAlerts, getSales, getEmailLog } from '../services/api'
+import { usePhpEstimateRate, formatPhpRate } from '../utils/exchangeRate'
 
 function formatPHP(value) {
   const num = parseFloat(value) || 0
@@ -22,6 +23,7 @@ export default function Dashboard() {
   const [summaryError, setSummaryError] = useState(null)
   const [alertsError, setAlertsError] = useState(null)
   const [emailError, setEmailError] = useState(null)
+  const phpRate = usePhpEstimateRate()
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
@@ -67,7 +69,7 @@ export default function Dashboard() {
         ) : summaryError ? (
           <p className="text-sm text-red-500">{summaryError}</p>
         ) : (
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
             <KPICard
               label="Total Revenue"
               value={summary ? formatPHP(summary.total_revenue_php) : '—'}
@@ -95,6 +97,10 @@ export default function Dashboard() {
             <KPICard
               label="Inventory Value"
               value={summary ? formatPHP(summary.active_inventory_value_php ?? 0) : '—'}
+            />
+            <KPICard
+              label="USD→PHP (est.)"
+              value={formatPhpRate(phpRate)}
             />
           </div>
         )}

@@ -45,4 +45,10 @@ export const deleteSubscription = (id) => client.delete(`/subscriptions/${id}`).
 // Email Log
 export const getEmailLog = (params = {}) => client.get('/email-log', { params }).then(r => r.data)
 
+// Settings
+export const scrapeEmails = (payload) => client.post('/gmail/scrape', payload).then(r => r.data)
+export const getScrapeStatus = () => client.get('/gmail/scrape-status').then(r => r.data)
+export const cancelScrape = () => client.post('/gmail/scrape-cancel').then(r => r.data)
+export const resetDatabase = (payload) => client.post('/settings/reset', payload).then(r => r.data)
+
 export default client

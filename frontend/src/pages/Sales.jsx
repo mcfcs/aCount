@@ -6,11 +6,18 @@ import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
 import { exportToCsv } from '../utils/csv'
 import { getSales, getSalesSummary, createSale, updateSale, deleteSale } from '../services/api'
+import { usePhpEstimateRate, usdToPhp } from '../utils/exchangeRate'
 
 function formatUSD(value) {
   const num = parseFloat(value) || 0
   return `$${num.toFixed(2)}`
 }
+
+function formatPHP(value) {
+  const num = parseFloat(value) || 0
+  return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(num)
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return '—'
   try { return new Date(dateStr).toLocaleDateString('en-PH') } catch { return dateStr }
@@ -19,6 +26,7 @@ function toDatetimeLocal(iso) {
   if (!iso) return ''
   try { return new Date(iso).toISOString().slice(0, 16) } catch { return '' }
 }
+
 
 const STATUS_STYLES = {
   Pending:            'bg-gray-100 text-gray-600',
@@ -81,6 +89,7 @@ export default function Sales() {
   const [orderSearch, setOrderSearch] = useState('')
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
+  const phpRate = usePhpEstimateRate()
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -118,7 +127,6 @@ export default function Sales() {
   }, [page, statusFilter])
 
   useEffect(() => { fetchData() }, [fetchData])
-
   const filtered = applyFilters(sales)
 
   const fetchAllSalesForExport = useCallback(async () => {
@@ -225,11 +233,15 @@ export default function Sales() {
 
       <div className="flex-1 p-6 space-y-6">
         {summary && (
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <KPICard label="Total Sales" value={summary.total_sales ?? sales.length} />
             <KPICard label="Completed" value={summary.by_status?.Completed ?? '—'} />
             <KPICard label="Unmatched" value={summary.unmatched_sales ?? '—'} />
             <KPICard label="Completed Earnings" value={summary.completed_earnings_usd != null ? formatUSD(summary.completed_earnings_usd) : '—'} />
+            <KPICard
+              label={`Completed Earnings (PHP est. @ ${phpRate || 0})`}
+              value={summary.completed_earnings_usd != null ? formatPHP(usdToPhp(summary.completed_earnings_usd, phpRate)) : '—'}
+            />
           </div>
         )}
 
@@ -240,6 +252,9 @@ export default function Sales() {
           <input type="text" placeholder="Order #…" value={orderSearch}
             onChange={e => setOrderSearch(e.target.value)}
             className="w-32 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+          <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+            Using USD→PHP rate from Settings: {phpRate}
+          </div>
           <select value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(1) }}
             className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400">
             <option value="">All Statuses</option>
@@ -264,7 +279,7 @@ export default function Sales() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    {['Order #','Shoe Name','Type','SKU','Size','Status','Selling Price','Amount Made','Sale Date','Inv. Match',''].map(col => (
+                    {['Order #','Shoe Name','Type','SKU','Size','Status','Selling Price','Amount Made','Amount Made (PHP est.)','Sale Date','Inv. Match',''].map(col => (
                       <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
                     ))}
                   </tr>
@@ -290,6 +305,9 @@ export default function Sales() {
                       </td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.selling_price != null ? formatUSD(sale.selling_price) : '—'}</td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.amount_made != null ? formatUSD(sale.amount_made) : '—'}</td>
+                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
+                        {usdToPhp(sale.amount_made, phpRate) != null ? formatPHP(usdToPhp(sale.amount_made, phpRate)) : '—'}
+                      </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(sale.sale_date)}</td>
                       <td className="px-4 py-3 text-gray-500">
                         {sale.inventory_match_status === 'Matched'
@@ -404,3 +422,4 @@ export default function Sales() {
     </div>
   )
 }
+

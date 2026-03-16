@@ -3,16 +3,25 @@ Gmail API routes.
 Spec: Section 3.4, 3.5
 
 Endpoints:
-  GET  /api/gmail/status   — poller status + last poll info
-  POST /api/gmail/poll     — trigger a manual poll
-  GET  /api/gmail/auth     — check Gmail auth connectivity
+  GET  /api/gmail/status       - poller status + last poll info
+  POST /api/gmail/poll         - trigger a manual poll
+  GET  /api/gmail/auth         - check Gmail auth connectivity
+  POST /api/gmail/scrape       - trigger range scrape (sync or async)
+  GET  /api/gmail/scrape-status - scrape progress/status
 """
 
 import logging
 from flask import Blueprint, jsonify, request, current_app
 
 from app.gmail.auth import check_connection
-from app.gmail.poller import poll_once, get_poller_status, scrape_date_range
+from app.gmail.poller import (
+    poll_once,
+    get_poller_status,
+    scrape_date_range,
+    start_scrape_date_range,
+    get_scrape_status,
+    cancel_scrape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +61,10 @@ def scrape():
     Re-fetch and process all alias.org emails in a date range.
 
     Body (JSON):
-      after   (required) — start date, e.g. "2026-03-01"
-      before  (optional) — end date,   e.g. "2026-03-16"
-      force   (optional) — if true, re-processes already-seen emails (default: false)
+      after   (required) - start date, e.g. "2026-03-01"
+      before  (optional) - end date,   e.g. "2026-03-16"
+      force   (optional) - if true, re-processes already-seen emails (default: false)
+      async   (optional) - if true, run in background (default: true)
     """
     data = request.get_json(silent=True) or {}
     after = data.get("after")
@@ -63,6 +73,27 @@ def scrape():
 
     before = data.get("before")
     force = bool(data.get("force", False))
+    asynchronous = bool(data.get("async", True))
+
+    if asynchronous:
+        started = start_scrape_date_range(
+            current_app._get_current_object(),
+            after=after,
+            before=before,
+            force=force,
+        )
+        if not started:
+            return jsonify({
+                "status": "error",
+                "error": "A scrape is already running.",
+                "scrape_status": get_scrape_status(),
+            }), 409
+
+        return jsonify({
+            "status": "started",
+            "message": "Scrape started in background.",
+            "scrape_status": get_scrape_status(),
+        }), 202
 
     try:
         result = scrape_date_range(
@@ -75,3 +106,18 @@ def scrape():
     except Exception as e:
         logger.exception(f"Scrape failed: {e}")
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@gmail_bp.get("/scrape-status")
+def scrape_status():
+    """Return current background scrape progress."""
+    return jsonify(get_scrape_status()), 200
+
+
+@gmail_bp.post("/scrape-cancel")
+def scrape_cancel():
+    """Request cancellation of a running scrape."""
+    result = cancel_scrape()
+    if result.get("status") == "not_running":
+        return jsonify(result), 409
+    return jsonify(result), 200

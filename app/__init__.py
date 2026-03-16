@@ -36,6 +36,7 @@ def create_app(config_name="development"):
     from app.routes.email_log import email_log_bp
     from app.routes.gmail import gmail_bp
     from app.routes.dashboard import dashboard_bp
+    from app.routes.settings import settings_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
@@ -46,6 +47,7 @@ def create_app(config_name="development"):
     app.register_blueprint(email_log_bp, url_prefix="/api/email-log")
     app.register_blueprint(gmail_bp, url_prefix="/api/gmail")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+    app.register_blueprint(settings_bp, url_prefix="/api/settings")
 
     # Start background Gmail poller (skip in testing)
     if app.config.get("GMAIL_POLLER_ENABLED", True) and not app.config.get("TESTING"):

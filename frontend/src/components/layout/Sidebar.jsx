@@ -41,6 +41,16 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    to: '/settings',
+    label: 'Settings',
+    icon: (
+      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M11.25 3.75l.53 2.16a2 2 0 001.97 1.56h2.09a2 2 0 011.9 2.56l-.5 2.16a2 2 0 01-.57 1.03l-1.53 1.53a2 2 0 000 2.83l1.53 1.53a2 2 0 01.57 1.03l.5 2.16a2 2 0 01-1.9 2.56h-2.1a2 2 0 00-1.96 1.57l-.53 2.16a2 2 0 01-1.9 1.56h-2.1a2 2 0 01-1.9-1.56l-.53-2.16A2 2 0 007.17 18.5H5.08a2 2 0 01-1.9-2.56l.5-2.16a2 2 0 01.57-1.03L5.3 11.5a2 2 0 000-2.83L3.77 7.14A2 2 0 013.2 6.11l-.5-2.16A2 2 0 014.6 1.39H6.7A2 2 0 008.67 3zm1.75 6.75a3.25 3.25 0 100 6.5 3.25 3.25 0 000-6.5z" />
+      </svg>
+    ),
+  },
 ]
 
 export default function Sidebar() {
