@@ -37,7 +37,7 @@ export const updateExpense = (id, data) => client.patch(`/expenses/${id}`, data)
 export const deleteExpense = (id) => client.delete(`/expenses/${id}`).then(r => r.data)
 
 // Subscriptions
-export const getSubscriptions = () => client.get('/subscriptions').then(r => r.data)
+export const getSubscriptions = (params = {}) => client.get('/subscriptions', { params }).then(r => r.data)
 export const createSubscription = (data) => client.post('/subscriptions', data).then(r => r.data)
 export const updateSubscription = (id, data) => client.patch(`/subscriptions/${id}`, data).then(r => r.data)
 export const deleteSubscription = (id) => client.delete(`/subscriptions/${id}`).then(r => r.data)

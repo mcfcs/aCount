@@ -91,12 +91,36 @@ export default function Inventory() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
-  const filtered = searchQuery
-    ? items.filter(item => {
-        const q = searchQuery.toLowerCase()
-        return (item.shoe_name || '').toLowerCase().includes(q) || (item.sku || '').toLowerCase().includes(q)
-      })
-    : items
+  const applyFilters = useCallback((rows) => {
+    if (!searchQuery) return rows
+    const q = searchQuery.toLowerCase()
+    return rows.filter(item => (item.shoe_name || '').toLowerCase().includes(q) || (item.sku || '').toLowerCase().includes(q))
+  }, [searchQuery])
+
+  const filtered = applyFilters(items)
+
+  const fetchAllInventoryForExport = useCallback(async () => {
+    let pageNum = 1
+    const allItems = []
+    const perPage = 100
+    while (true) {
+      const params = { page: pageNum, per_page: perPage }
+      if (statusFilter) params.status = statusFilter
+      const data = await getInventory(params)
+      const rows = Array.isArray(data) ? data : data.inventory || data.items || []
+      const totalPages = data.pages || Math.ceil((data.total || 0) / perPage)
+      allItems.push(...rows)
+      if (data.pages != null) {
+        if (pageNum >= totalPages) break
+      } else if (rows.length < perPage) {
+        break
+      } else if (data.total && allItems.length >= data.total) {
+        break
+      }
+      pageNum += 1
+    }
+    return applyFilters(allItems)
+  }, [statusFilter, applyFilters])
 
   const totalValue = items.reduce((sum, i) => sum + parseFloat(i.purchase_cost || 0), 0)
 
@@ -162,7 +186,9 @@ export default function Inventory() {
   }
 
   const handleExport = () => {
-    exportToCsv('inventory-export.csv', filtered, INVENTORY_CSV_COLUMNS)
+    fetchAllInventoryForExport()
+      .then(data => exportToCsv('inventory-export.csv', data, INVENTORY_CSV_COLUMNS))
+      .catch((err) => setError(err?.response?.data?.error || 'Failed to export inventory data'))
   }
 
   return (

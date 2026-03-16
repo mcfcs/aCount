@@ -78,6 +78,27 @@ function BankTransfersTab() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
+  const fetchAllTransfersForExport = useCallback(async () => {
+    let pageNum = 1
+    const allItems = []
+    const perPage = 100
+    while (true) {
+      const tData = await getBankTransfers({ page: pageNum, per_page: perPage })
+      const items = Array.isArray(tData) ? tData : tData.transfers || tData.items || []
+      const totalPages = tData.pages || Math.ceil((tData.total || 0) / perPage)
+      allItems.push(...items)
+      if (tData.pages != null) {
+        if (pageNum >= totalPages) break
+      } else if (items.length < perPage) {
+        break
+      } else if (tData.total && allItems.length >= tData.total) {
+        break
+      }
+      pageNum += 1
+    }
+    return allItems
+  }, [])
+
   const handleDelete = async (transfer) => {
     if (!window.confirm(`Delete transfer of ${formatPHP(transfer.amount_php)} on ${formatDate(transfer.transfer_date)}? This action cannot be undone.`)) return
     try {
@@ -89,7 +110,9 @@ function BankTransfersTab() {
   }
 
   const handleExport = () => {
-    exportToCsv('bank-transfers-export.csv', transfers, BANK_TRANSFER_CSV_COLUMNS)
+    fetchAllTransfersForExport()
+      .then((data) => exportToCsv('bank-transfers-export.csv', data, BANK_TRANSFER_CSV_COLUMNS))
+      .catch((err) => setError(err?.response?.data?.error || 'Failed to export bank transfers'))
   }
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))
@@ -261,6 +284,27 @@ function ExpensesTab() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
+  const fetchAllExpensesForExport = useCallback(async () => {
+    let pageNum = 1
+    const allItems = []
+    const perPage = 100
+    while (true) {
+      const eData = await getExpenses({ page: pageNum, per_page: perPage })
+      const rows = Array.isArray(eData) ? eData : eData.expenses || eData.items || []
+      const totalPages = eData.pages || Math.ceil((eData.total || 0) / perPage)
+      allItems.push(...rows)
+      if (eData.pages != null) {
+        if (pageNum >= totalPages) break
+      } else if (rows.length < perPage) {
+        break
+      } else if (eData.total && allItems.length >= eData.total) {
+        break
+      }
+      pageNum += 1
+    }
+    return allItems
+  }, [])
+
   const handleDelete = async (expense) => {
     if (!window.confirm(`Delete expense "${expense.description || expense.category}"? This action cannot be undone.`)) return
     try {
@@ -272,7 +316,9 @@ function ExpensesTab() {
   }
 
   const handleExport = () => {
-    exportToCsv('expenses-export.csv', expenses, EXPENSE_CSV_COLUMNS)
+    fetchAllExpensesForExport()
+      .then((data) => exportToCsv('expenses-export.csv', data, EXPENSE_CSV_COLUMNS))
+      .catch((err) => setError(err?.response?.data?.error || 'Failed to export expenses'))
   }
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))
@@ -441,6 +487,27 @@ function SubscriptionsTab() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
+  const fetchAllSubscriptionsForExport = useCallback(async () => {
+    let pageNum = 1
+    const allItems = []
+    const perPage = 100
+    while (true) {
+      const data = await getSubscriptions({ page: pageNum, per_page: perPage })
+      const rows = Array.isArray(data) ? data : data.subscriptions || data.items || []
+      const totalPages = data.pages || Math.ceil((data.total || 0) / perPage)
+      allItems.push(...rows)
+      if (data.pages != null) {
+        if (pageNum >= totalPages) break
+      } else if (rows.length < perPage) {
+        break
+      } else if (data.total && allItems.length >= data.total) {
+        break
+      }
+      pageNum += 1
+    }
+    return allItems
+  }, [])
+
   const handleDelete = async (subscription) => {
     if (!window.confirm(`Delete ${subscription.service_name || subscription.name}? This action cannot be undone.`)) return
     try {
@@ -452,7 +519,9 @@ function SubscriptionsTab() {
   }
 
   const handleExport = () => {
-    exportToCsv('subscriptions-export.csv', subs, SUBSCRIPTION_CSV_COLUMNS)
+    fetchAllSubscriptionsForExport()
+      .then((data) => exportToCsv('subscriptions-export.csv', data, SUBSCRIPTION_CSV_COLUMNS))
+      .catch((err) => setError(err?.response?.data?.error || 'Failed to export subscriptions'))
   }
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))

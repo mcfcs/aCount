@@ -88,6 +88,16 @@ export default function Sales() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
 
+  const applyFilters = useCallback((rows) => {
+    return rows.filter(s => {
+      const q = searchQuery.toLowerCase()
+      const oq = orderSearch.trim()
+      const nameMatch = !q || (s.shoe_name || '').toLowerCase().includes(q)
+      const orderMatch = !oq || String(s.order_number || '').includes(oq)
+      return nameMatch && orderMatch
+    })
+  }, [searchQuery, orderSearch])
+
   const fetchData = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -109,13 +119,30 @@ export default function Sales() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
-  const filtered = sales.filter(s => {
-    const q = searchQuery.toLowerCase()
-    const oq = orderSearch.trim()
-    const nameMatch = !q || (s.shoe_name || '').toLowerCase().includes(q)
-    const orderMatch = !oq || String(s.order_number || '').includes(oq)
-    return nameMatch && orderMatch
-  })
+  const filtered = applyFilters(sales)
+
+  const fetchAllSalesForExport = useCallback(async () => {
+    let pageNum = 1
+    const allItems = []
+    const perPage = 100
+    while (true) {
+      const params = { page: pageNum, per_page: perPage }
+      if (statusFilter) params.status = statusFilter
+      const salesData = await getSales(params)
+      const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
+      const totalPages = salesData.pages || Math.ceil((salesData.total || 0) / perPage)
+      allItems.push(...items)
+      if (salesData.pages != null) {
+        if (pageNum >= totalPages) break
+      } else if (items.length < perPage) {
+        break
+      } else if (salesData.total && allItems.length >= salesData.total) {
+        break
+      }
+      pageNum += 1
+    }
+    return allItems
+  }, [statusFilter])
 
   const openAdd = () => {
     setEditing(null)
@@ -182,8 +209,14 @@ export default function Sales() {
     }
   }
 
-  const handleExport = () => {
-    exportToCsv('sales-export.csv', filtered, SALES_CSV_COLUMNS)
+  const handleExport = async () => {
+    try {
+      const allSales = await fetchAllSalesForExport()
+      const allFiltered = applyFilters(allSales)
+      exportToCsv('sales-export.csv', allFiltered, SALES_CSV_COLUMNS)
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to export sales data')
+    }
   }
 
   return (
