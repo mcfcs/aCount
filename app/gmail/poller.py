@@ -76,6 +76,9 @@ def poll_once(app) -> dict:
             logger.error(f"Gmail API fetch failed: {e}")
             return {"status": "error", "error": str(e), "processed": 0}
 
+        # Process oldest-first so state transitions flow correctly
+        messages = list(reversed(messages))
+
         processed = 0
         results = []
 
@@ -85,8 +88,8 @@ def poll_once(app) -> dict:
                     userId="me", id=msg_id, format="full"
                 ).execute()
 
-                subject, sender, body = get_message_parts(full_msg)
-                result = process_message(msg_id, subject, sender, body)
+                subject, sender, body, sent_at = get_message_parts(full_msg)
+                result = process_message(msg_id, subject, sender, body, sent_at=sent_at)
                 results.append(result)
 
                 if result.get("status") != "skipped":
@@ -176,6 +179,115 @@ def _fetch_recent(service, max_results: int = 50) -> list[str]:
             break
 
     return message_ids
+
+
+def fetch_date_range(service, after: str, before: str = None, max_results: int = 500) -> list[str]:
+    """
+    Fetch all messages from info@alias.org between two dates.
+    after / before are ISO date strings: "2026-03-01"
+    Gmail query uses YYYY/MM/DD format.
+    """
+    after_gm = after.replace("-", "/")
+    query = f"from:{ALIAS_SENDER} after:{after_gm}"
+    if before:
+        before_gm = before.replace("-", "/")
+        query += f" before:{before_gm}"
+
+    message_ids = []
+    page_token = None
+
+    while len(message_ids) < max_results:
+        kwargs = {
+            "userId": "me",
+            "q": query,
+            "maxResults": min(max_results - len(message_ids), 100),
+        }
+        if page_token:
+            kwargs["pageToken"] = page_token
+
+        response = service.users().messages().list(**kwargs).execute()
+        for msg in response.get("messages", []):
+            message_ids.append(msg["id"])
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return message_ids
+
+
+def scrape_date_range(app, after: str, before: str = None, force: bool = False) -> dict:
+    """
+    Fetch and process all alias.org emails in a date range.
+    force=True deletes existing EmailProcessingLog entries so messages are re-processed.
+    """
+    with app.app_context():
+        from app.models.models import EmailProcessingLog
+        from app import db
+
+        try:
+            service = get_gmail_service()
+        except RuntimeError as e:
+            return {"status": "error", "error": str(e), "processed": 0}
+
+        try:
+            message_ids = fetch_date_range(service, after, before)
+        except Exception as e:
+            logger.error(f"Date-range fetch failed: {e}")
+            return {"status": "error", "error": str(e), "processed": 0}
+
+        if force and message_ids:
+            deleted = (
+                db.session.query(EmailProcessingLog)
+                .filter(EmailProcessingLog.gmail_message_id.in_(message_ids))
+                .delete(synchronize_session=False)
+            )
+            db.session.commit()
+            logger.info(f"Force mode: deleted {deleted} existing log entries.")
+
+        # Gmail returns newest-first; reverse to process oldest-first so the
+        # state machine flows correctly: Sale → Confirmation → Shipped → Completed
+        message_ids = list(reversed(message_ids))
+
+        processed = 0
+        skipped = 0
+        results = []
+
+        for msg_id in message_ids:
+            try:
+                full_msg = service.users().messages().get(
+                    userId="me", id=msg_id, format="full"
+                ).execute()
+
+                subject, sender, body, sent_at = get_message_parts(full_msg)
+                result = process_message(msg_id, subject, sender, body, sent_at=sent_at)
+                results.append(result)
+
+                if result.get("status") == "skipped":
+                    skipped += 1
+                else:
+                    processed += 1
+
+                msg_history_id = full_msg.get("historyId")
+                if msg_history_id:
+                    state = _load_state()
+                    if not state.get("history_id") or int(msg_history_id) > int(state["history_id"]):
+                        state["history_id"] = msg_history_id
+                        _save_state(state)
+
+            except Exception as e:
+                logger.exception(f"Error processing message {msg_id}: {e}")
+
+        logger.info(f"Scrape complete: {processed} processed, {skipped} skipped.")
+        return {
+            "status": "ok",
+            "after": after,
+            "before": before,
+            "total_fetched": len(message_ids),
+            "processed": processed,
+            "skipped": skipped,
+            "results": results,
+        }
 
 
 # =============================================================================

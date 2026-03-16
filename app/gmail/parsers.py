@@ -9,8 +9,9 @@ and returns a dict of extracted fields. Missing fields are omitted (not None).
 import re
 import base64
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from email import message_from_bytes
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
 logger = logging.getLogger(__name__)
@@ -20,20 +21,30 @@ logger = logging.getLogger(__name__)
 # Gmail message utilities
 # =============================================================================
 
-def get_message_parts(gmail_message: dict) -> tuple[str, str]:
+def get_message_parts(gmail_message: dict) -> tuple[str, str, str, datetime | None]:
     """
-    Extract (subject, plain_text_body) from a Gmail API message resource.
-    Handles multipart messages; falls back to snippet if no plain text part.
+    Extract (subject, sender, body, sent_at) from a Gmail API message resource.
+    sent_at is the email's Date header parsed to a UTC-naive datetime, or None.
     """
     headers = gmail_message.get("payload", {}).get("headers", [])
     subject = next((h["value"] for h in headers if h["name"].lower() == "subject"), "")
     sender = next((h["value"] for h in headers if h["name"].lower() == "from"), "")
+    date_str = next((h["value"] for h in headers if h["name"].lower() == "date"), "")
+
+    sent_at = None
+    if date_str:
+        try:
+            dt = parsedate_to_datetime(date_str)
+            # Convert to UTC-naive datetime
+            sent_at = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            pass
 
     body = _extract_body(gmail_message.get("payload", {}))
     if not body:
         body = gmail_message.get("snippet", "")
 
-    return subject, sender, body
+    return subject, sender, body, sent_at
 
 
 def _extract_body(payload: dict) -> str:
@@ -126,14 +137,27 @@ def parse_sale_notification(subject: str, body: str) -> dict:
     if order_match:
         result["order_number"] = int(order_match.group(1))
 
-    # Shoe name: line after "Name:" OR extracted from subject "Your [Name] Just Sold"
+    # Detect consignment sale (auto-confirmed, no separate Confirmation email)
+    if re.search(r'\bconsigned\b', subject, re.IGNORECASE):
+        result["is_consigned"] = True
+
+    # Shoe name: line after "Name:" OR from subject
     name_match = re.search(r'Name:\s*(.+)', body, re.IGNORECASE)
     if name_match:
         result["shoe_name"] = name_match.group(1).strip()
     else:
-        subj_match = re.search(r'Your (.+?) Just Sold', subject, re.IGNORECASE)
+        # "Your [Name] Just Sold" or "Your consigned [Name] Just Sold"
+        subj_match = re.search(r'Your (?:consigned\s+)?(.+?) Just Sold', subject, re.IGNORECASE)
         if subj_match:
             result["shoe_name"] = subj_match.group(1).strip()
+        else:
+            # "You filled an offer for [Name] - Start Packaging"
+            subj_match2 = re.search(
+                r'(?:filled an offer for|You filled an offer for)\s+(.+?)\s*[-–]',
+                subject, re.IGNORECASE
+            )
+            if subj_match2:
+                result["shoe_name"] = subj_match2.group(1).strip()
 
     # Condition: line after "Condition:"
     cond_match = re.search(r'Condition:\s*(.+)', body, re.IGNORECASE)
@@ -207,8 +231,9 @@ def parse_confirmation(subject: str, body: str) -> dict:
         result["pickup_address"] = addr_match.group(1).strip()
 
     # Pickup window: "on [DATE] between [TIME] and [TIME]"
+    # Stop at period or newline to avoid capturing the full paragraph
     window_match = re.search(
-        r'on\s+(\d{4}-\d{2}-\d{2}|\w+ \d+,? \d{4})\s+between\s+(.+?)\s+and\s+(.+?)(?:\n|$)',
+        r'on\s+(\d{4}-\d{2}-\d{2}|\w+ \d+,? \d{4})\s+between\s+(.+?)\s+and\s+([^.\n]+)',
         body, re.IGNORECASE
     )
     if window_match:
@@ -227,8 +252,10 @@ def parse_confirmation(subject: str, body: str) -> dict:
 
 def _parse_deadline(deadline_str: str) -> datetime | None:
     """Try multiple date formats for the shipment deadline string."""
-    # Strip timezone name (e.g., "Asia/Manila") — just keep date/time
-    cleaned = re.sub(r'\s+[A-Za-z]+/[A-Za-z_]+$', '', deadline_str).strip()
+    # Strip trailing sentence after the timezone (e.g., "Asia/Manila. Failure to do so...")
+    cleaned = re.sub(r'\s+[A-Za-z]+/[A-Za-z_]+.*$', '', deadline_str).strip()
+    # Also handle a plain period with trailing text if no timezone was present
+    cleaned = re.split(r'\.\s+[A-Z]', cleaned)[0].strip()
     formats = [
         "%B %d, %Y %H:%M",   # March 10, 2026 00:00
         "%B %d %Y %H:%M",    # March 10 2026 00:00
@@ -382,11 +409,17 @@ def parse_order_number_only(subject: str, body: str) -> dict:
     if order_match:
         result["order_number"] = int(order_match.group(1))
 
-    # Completed: also grab amount_made if present
+    # Completed: grab amount from body "Amount Made: $XX" or "Earnings: $XX"
     made_match = re.search(
         r'(?:Amount Made|Earnings):\s*\$?([\d,]+(?:\.\d+)?)', body, re.IGNORECASE
     )
     if made_match:
         result["amount_made"] = float(made_match.group(1).replace(",", ""))
+
+    # Completed subject: "Order #XXXXXX Completed: USD $68.84 Available for Cash Out"
+    if not result.get("amount_made"):
+        usd_match = re.search(r'USD\s*\$?([\d,]+(?:\.\d+)?)', subject, re.IGNORECASE)
+        if usd_match:
+            result["amount_made"] = float(usd_match.group(1).replace(",", ""))
 
     return result

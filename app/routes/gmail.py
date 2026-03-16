@@ -9,10 +9,10 @@ Endpoints:
 """
 
 import logging
-from flask import Blueprint, jsonify, current_app
+from flask import Blueprint, jsonify, request, current_app
 
 from app.gmail.auth import check_connection
-from app.gmail.poller import poll_once, get_poller_status
+from app.gmail.poller import poll_once, get_poller_status, scrape_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -43,3 +43,35 @@ def auth_check():
     if ok:
         return jsonify({"status": "ok", "email": detail}), 200
     return jsonify({"status": "error", "error": detail}), 503
+
+
+@gmail_bp.post("/scrape")
+def scrape():
+    """
+    POST /api/gmail/scrape
+    Re-fetch and process all alias.org emails in a date range.
+
+    Body (JSON):
+      after   (required) — start date, e.g. "2026-03-01"
+      before  (optional) — end date,   e.g. "2026-03-16"
+      force   (optional) — if true, re-processes already-seen emails (default: false)
+    """
+    data = request.get_json(silent=True) or {}
+    after = data.get("after")
+    if not after:
+        return jsonify({"error": "'after' date is required (e.g. '2026-03-01')"}), 400
+
+    before = data.get("before")
+    force = bool(data.get("force", False))
+
+    try:
+        result = scrape_date_range(
+            current_app._get_current_object(),
+            after=after,
+            before=before,
+            force=force,
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        logger.exception(f"Scrape failed: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500

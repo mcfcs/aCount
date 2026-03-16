@@ -27,7 +27,7 @@ _MOLD_KEYWORDS = {"mold"}
 _WRONG_SIZE_SKU_KEYWORDS = {"wrong size", "wrong sku", "incorrect size", "incorrect sku"}
 
 
-def process_message(gmail_message_id: str, subject: str, sender: str, body: str) -> dict:
+def process_message(gmail_message_id: str, subject: str, sender: str, body: str, sent_at=None) -> dict:
     """
     Main entry point. Processes one Gmail message end-to-end.
     Returns a summary dict: {email_type, status, record_type, record_id, error}
@@ -48,7 +48,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str)
     status = "Success"
 
     try:
-        result = _dispatch(email_type, subject, body, parsed_data)
+        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at)
         if result:
             record_type, record_id = result
     except Exception as e:
@@ -81,13 +81,13 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str)
 # Dispatch table
 # =============================================================================
 
-def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict):
+def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None):
     """Route to the correct handler. Returns (record_type, record_id) or None."""
 
     if email_type == "Sale":
         data = parsers.parse_sale_notification(subject, body)
         parsed_data.update(data)
-        return _handle_sale(data)
+        return _handle_sale(data, sent_at=sent_at)
 
     elif email_type == "Confirmation":
         data = parsers.parse_confirmation(subject, body)
@@ -137,7 +137,7 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict):
 # Handlers — one per email type
 # =============================================================================
 
-def _handle_sale(data: dict):
+def _handle_sale(data: dict, sent_at=None):
     """
     Spec 4.2 steps 1–5: Create Sale record + FIFO inventory match.
     """
@@ -150,6 +150,9 @@ def _handle_sale(data: dict):
         logger.info(f"Sale #{order_number} already exists (sale_id={existing_sale.sale_id}).")
         return "Sale", existing_sale.sale_id
 
+    # Consignment sales are auto-confirmed by Alias — no separate Confirmation email arrives
+    initial_status = "Confirmed" if data.get("is_consigned") else "Pending"
+
     sale = Sale(
         order_number=order_number,
         sku=data.get("sku", "UNKNOWN"),
@@ -159,8 +162,8 @@ def _handle_sale(data: dict):
         box_condition=data.get("box_condition"),
         selling_price=data.get("selling_price"),
         amount_made=data.get("amount_made"),
-        sale_date=datetime.utcnow(),
-        status="Pending",
+        sale_date=sent_at or datetime.utcnow(),
+        status=initial_status,
         inventory_match_status="Unmatched",
         platform="Alias",
     )
@@ -511,6 +514,17 @@ def _restore_inventory(sale: Sale):
         item.linked_sale_id = None
 
 
+def _serialize_parsed_data(data: dict) -> dict:
+    """Convert any non-JSON-serializable values (datetime, date) to ISO strings."""
+    result = {}
+    for k, v in data.items():
+        if isinstance(v, (datetime, date)):
+            result[k] = v.isoformat()
+        else:
+            result[k] = v
+    return result
+
+
 def _write_log(gmail_message_id, email_type, status, parsed_data,
                error_message, record_type, record_id):
     try:
@@ -518,7 +532,7 @@ def _write_log(gmail_message_id, email_type, status, parsed_data,
             gmail_message_id=gmail_message_id,
             email_type=email_type,
             status=status,
-            parsed_data=parsed_data,
+            parsed_data=_serialize_parsed_data(parsed_data) if parsed_data else None,
             error_message=error_message,
             linked_record_type=record_type,
             linked_record_id=record_id,

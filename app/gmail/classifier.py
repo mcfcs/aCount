@@ -55,8 +55,13 @@ def _classify_alias(subject: str, body: str) -> str:
     """Classify emails from info@alias.org by subject + body patterns."""
 
     # "Your [Shoe] Just Sold" — sale notification
-    if "just sold" in subject:
+    # "You filled an offer for [Shoe] - Start Packaging Order #XXXXXX"
+    if "just sold" in subject or "filled an offer" in subject or "start packaging" in subject:
         return "Sale"
+
+    # "Order #XXXXXX Shipping Label Error" — ignore, label is auto-regenerated
+    if "shipping label error" in subject:
+        return "Other"
 
     # "Order #XXXXXX - Shipping Label and Instructions" — confirmed
     if "shipping label" in subject and "instructions" in subject:
@@ -66,8 +71,11 @@ def _classify_alias(subject: str, body: str) -> str:
     if "shipped to alias" in subject or ("shipped" in subject and "verification" in subject):
         return "Shipped"
 
-    # "Order #XXXXXX Completed" + "Available for Cash Out" in body
-    if "completed" in subject and "available for cash out" in body:
+    # "Order #XXXXXX Completed: USD $XX.XX Available for Cash Out"
+    # The phrase may appear in subject or body
+    if "completed" in subject and (
+        "available for cash out" in subject or "available for cash out" in body
+    ):
         return "Completed"
 
     # "Order #XXXXXX - Attention Needed"

@@ -85,7 +85,7 @@ class Sale(db.Model):
     confirmation_datetime   = db.Column(db.DateTime, nullable=True)
     shipment_deadline       = db.Column(db.DateTime, nullable=True)
     pickup_address          = db.Column(db.Text, nullable=True)
-    pickup_window           = db.Column(db.String(255), nullable=True)
+    pickup_window           = db.Column(db.Text, nullable=True)
     shipment_date           = db.Column(db.DateTime, nullable=True)
     completion_date         = db.Column(db.Date, nullable=True)
     cancellation_date       = db.Column(db.Date, nullable=True)
