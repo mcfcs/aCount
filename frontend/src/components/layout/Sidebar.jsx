@@ -53,11 +53,15 @@ const navItems = [
   },
 ]
 
-export default function Sidebar() {
+export default function Sidebar({ isOpen = false, onClose = () => {} }) {
   return (
-    <aside className="flex h-screen w-60 flex-col bg-gray-900 text-white fixed left-0 top-0 z-10">
+    <aside
+      className={`${
+        isOpen ? 'translate-x-0' : '-translate-x-full'
+      } fixed left-0 top-0 bottom-0 z-40 flex w-72 max-w-[85vw] min-w-0 flex-col overflow-hidden bg-gray-900 text-white transition-transform duration-200 lg:translate-x-0 lg:z-10`}
+    >
       {/* Logo */}
-      <div className="flex items-center gap-2 px-6 py-5 border-b border-gray-800">
+      <div className="flex items-center justify-between gap-2 px-6 py-5 border-b border-gray-800">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600">
           <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -65,10 +69,18 @@ export default function Sidebar() {
           </svg>
         </div>
         <span className="text-lg font-bold tracking-tight">aCount</span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-md border border-gray-700 px-2 py-1 text-sm text-gray-200 lg:hidden"
+          aria-label="Close navigation"
+        >
+          ×
+        </button>
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+      <nav className="min-h-0 flex-1 overflow-y-auto px-3 py-4 space-y-1">
         {navItems.map(item => (
           <NavLink
             key={item.to}
@@ -81,6 +93,7 @@ export default function Sidebar() {
                   : 'text-gray-400 hover:bg-gray-800 hover:text-white'
               }`
             }
+            onClick={onClose}
           >
             {item.icon}
             {item.label}
@@ -95,3 +108,5 @@ export default function Sidebar() {
     </aside>
   )
 }
+
+

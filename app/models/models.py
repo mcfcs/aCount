@@ -8,6 +8,26 @@ from app import db
 
 
 # ---------------------------------------------------------------------------
+# Application settings (Section 5.8)
+# ---------------------------------------------------------------------------
+
+
+class AppSetting(db.Model):
+    __tablename__ = "app_settings"
+
+    key = db.Column(db.String(64), primary_key=True)
+    value = db.Column(db.Numeric(10, 4), nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "key": self.key,
+            "value": float(self.value) if self.value is not None else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Inventory (Section 5.1)
 # ---------------------------------------------------------------------------
 

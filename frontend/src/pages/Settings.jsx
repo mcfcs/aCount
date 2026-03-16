@@ -46,6 +46,7 @@ export default function Settings() {
     return String(saved)
   })
   const [rateSaved, setRateSaved] = useState(false)
+  const [rateSaving, setRateSaving] = useState(false)
 
   const canReset = confirmText === 'RESET'
 
@@ -112,20 +113,19 @@ export default function Settings() {
     }
   }
 
-  const saveRate = () => {
-    const saved = writePhpEstimateRate(phpRate)
-    if (!saved) {
-      setRateSaved(false)
-      return
-    }
-    setRateSaved(true)
+  const saveRate = async () => {
+    setRateSaving(true)
+    const saved = await writePhpEstimateRate(phpRate)
+    setRateSaving(false)
+
+    setRateSaved(Boolean(saved))
   }
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Settings" onRefresh={refresh} />
 
-      <div className="flex-1 space-y-6 p-6">
+      <div className="flex-1 space-y-6 p-4 sm:p-6">
         <Card title="PHP Estimate Rate">
           <div className="max-w-sm space-y-2">
             <label className="mb-1 block text-xs font-medium text-gray-600">USD to PHP (est.)</label>
@@ -144,10 +144,10 @@ export default function Settings() {
               <button
                 type="button"
                 onClick={saveRate}
-                disabled={!phpRate || Number(phpRate) <= 0}
+                disabled={rateSaving || !phpRate || Number(phpRate) <= 0}
                 className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
               >
-                Save Rate
+                {rateSaving ? 'Saving...' : 'Save Rate'}
               </button>
               {rateSaved && <span className="text-sm text-green-600">Saved</span>}
             </div>
@@ -196,17 +196,17 @@ export default function Settings() {
               >
                 {scrapeBusy ? 'Scraping...' : 'Run Scrape'}
               </button>
-            <p className="text-xs text-gray-500">Includes all Alias dates in selected date window.</p>
-          </div>
-        </form>
+              <p className="text-xs text-gray-500">Includes all Alias dates in selected date window.</p>
+            </div>
+          </form>
 
-        {scrapeResult && (
-          <StatusPill tone="green">
-            {scrapeResult.status === 'started'
-              ? scrapeResult.message
-              : `Scrape complete: ${scrapeResult.processed || 0} processed, ${scrapeResult.skipped || 0} skipped, total ${scrapeResult.total_fetched || 0}.`}
-          </StatusPill>
-        )}
+          {scrapeResult && (
+            <StatusPill tone="green">
+              {scrapeResult.status === 'started'
+                ? scrapeResult.message
+                : `Scrape complete: ${scrapeResult.processed || 0} processed, ${scrapeResult.skipped || 0} skipped, total ${scrapeResult.total_fetched || 0}.`}
+            </StatusPill>
+          )}
           {scrapeError && <StatusPill tone="red">{scrapeError}</StatusPill>}
         </Card>
 

@@ -9,14 +9,70 @@ from app.models.models import (
   BankTransferAllocation,
   BankTransfer,
   Expense,
+  AppSetting,
   Inventory,
   Sale,
   Subscription,
   EmailProcessingLog,
 )
 
+PHP_RATE_SETTING_KEY = "php_estimate_rate"
+DEFAULT_PHP_ESTIMATE_RATE = 56.0
+ALLOWED_RATE_MIN = 0.0001
 
 settings_bp = Blueprint("settings", __name__)
+
+
+@settings_bp.get("/php-rate")
+def get_php_rate():
+    """
+    GET /api/settings/php-rate
+    """
+    try:
+        setting = AppSetting.query.get(PHP_RATE_SETTING_KEY)
+    except Exception:
+        return jsonify({"rate": DEFAULT_PHP_ESTIMATE_RATE, "source": "default"}), 200
+
+    if setting is None:
+        return jsonify({"rate": DEFAULT_PHP_ESTIMATE_RATE, "source": "default"}), 200
+
+    return jsonify({
+        "rate": float(setting.value),
+        "source": "database",
+        "updated_at": setting.updated_at.isoformat() if setting.updated_at else None,
+    }), 200
+
+
+@settings_bp.put("/php-rate")
+def set_php_rate():
+    """
+    PUT /api/settings/php-rate
+    Body:
+      rate (required): positive numeric PHP per 1 USD
+    """
+    data = request.get_json(silent=True) or {}
+    rate = data.get("rate")
+
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        return jsonify({"error": "rate must be a positive number"}), 400
+
+    if rate < ALLOWED_RATE_MIN:
+        return jsonify({"error": f"rate must be greater than {ALLOWED_RATE_MIN}"}), 400
+
+    try:
+        setting = AppSetting.query.get(PHP_RATE_SETTING_KEY)
+        if setting is None:
+            setting = AppSetting(key=PHP_RATE_SETTING_KEY, value=rate)
+            db.session.add(setting)
+        else:
+            setting.value = rate
+        db.session.commit()
+        return jsonify({"rate": float(setting.value), "updated_at": setting.updated_at.isoformat() if setting.updated_at else None}), 200
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to save PHP estimate rate: {str(exc)}"}), 500
 
 
 @settings_bp.post("/reset")

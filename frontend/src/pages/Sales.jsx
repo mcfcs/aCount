@@ -231,9 +231,9 @@ export default function Sales() {
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Sales" onRefresh={fetchData} loading={loading} />
 
-      <div className="flex-1 p-6 space-y-6">
+        <div className="flex-1 p-4 space-y-6 sm:p-6">
         {summary && (
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <KPICard label="Total Sales" value={summary.total_sales ?? sales.length} />
             <KPICard label="Completed" value={summary.by_status?.Completed ?? '—'} />
             <KPICard label="Unmatched" value={summary.unmatched_sales ?? '—'} />
@@ -245,27 +245,27 @@ export default function Sales() {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <input type="text" placeholder="Search shoe name…" value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto" />
           <input type="text" placeholder="Order #…" value={orderSearch}
             onChange={e => setOrderSearch(e.target.value)}
-            className="w-32 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
-          <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-32" />
+          <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 sm:flex-1">
             Using USD→PHP rate from Settings: {phpRate}
           </div>
           <select value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(1) }}
-            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400">
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto">
             <option value="">All Statuses</option>
             {ALL_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
           <button onClick={handleExport}
-            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+            className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
             Export CSV
           </button>
           <button onClick={openAdd}
-            className="ml-auto rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
+            className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors sm:ml-auto sm:w-auto">
             + Add Sale
           </button>
         </div>
@@ -276,7 +276,7 @@ export default function Sales() {
           : !filtered.length ? <EmptyState title="No sales found" message="Try adjusting your filters." />
           : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
                     {['Order #','Shoe Name','Type','SKU','Size','Status','Selling Price','Amount Made','Amount Made (PHP est.)','Sale Date','Inv. Match',''].map(col => (
@@ -315,15 +315,17 @@ export default function Sales() {
                           : <span className="text-gray-400">Unmatched</span>}
                       </td>
                     <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
                         <button onClick={() => openEdit(sale)}
                           className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
                           Edit
                         </button>
                         <button onClick={() => handleDelete(sale)}
-                          className="ml-3 text-xs text-red-600 hover:text-red-800 font-medium">
+                          className="text-xs text-red-600 hover:text-red-800 font-medium">
                           Delete
                         </button>
-                      </td>
+                      </div>
+                    </td>
                     </tr>
                   ))}
                 </tbody>
@@ -348,7 +350,7 @@ export default function Sales() {
       {modalOpen && (
         <Modal title={editing ? `Edit Sale #${editing.order_number}` : 'Add Sale'} onClose={() => setModalOpen(false)}>
           <form onSubmit={handleSave} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Order Number">
                 <input type="number" required value={form.order_number} onChange={set('order_number')} className={INPUT} />
               </Field>
@@ -359,7 +361,7 @@ export default function Sales() {
             <Field label="Shoe Name">
               <input type="text" required value={form.shoe_name} onChange={set('shoe_name')} className={INPUT} />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="SKU">
                 <input type="text" value={form.sku} onChange={set('sku')} className={INPUT} />
               </Field>
@@ -367,7 +369,7 @@ export default function Sales() {
                 <input type="number" step="0.5" value={form.size} onChange={set('size')} className={INPUT} />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Sale Type">
                 <select value={form.sale_type} onChange={set('sale_type')} className={INPUT}>
                   {ALL_SALE_TYPES.map(t => <option key={t} value={t}>{SALE_TYPE_LABELS[t]}</option>)}
@@ -379,7 +381,7 @@ export default function Sales() {
                 </select>
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Condition">
                 <select value={form.condition} onChange={set('condition')} className={INPUT}>
                   <option value="">—</option>
@@ -396,7 +398,7 @@ export default function Sales() {
                 </select>
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Selling Price (USD)">
                 <input type="number" step="0.01" value={form.selling_price} onChange={set('selling_price')} className={INPUT} />
               </Field>

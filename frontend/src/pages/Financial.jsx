@@ -152,19 +152,19 @@ function BankTransfersTab() {
   const totalReceived = summary?.total_php ?? transfers.reduce((s, t) => s + parseFloat(t.amount_php || 0), 0)
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KPICard label="Total Received" value={formatPHP(totalReceived)} />
         <KPICard label="Reconciled" value={transfers.filter(t => t.reconciliation_status === 'Reconciled').length} valueClassName="text-green-600" />
         <KPICard label="Unreconciled" value={transfers.filter(t => t.reconciliation_status === 'Unreconciled').length} valueClassName="text-red-600" />
         <KPICard label="USD→PHP (est.)" value={formatPhpRate(phpRate)} />
       </div>
 
-        <div className="flex justify-end">
-          <button onClick={handleExport} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button onClick={handleExport} className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
             Export CSV
           </button>
-          <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
+          <button onClick={openAdd} className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors sm:w-auto">
             + Add Transfer
           </button>
         </div>
@@ -172,7 +172,7 @@ function BankTransfersTab() {
       <div className="rounded-xl shadow-sm border border-gray-100 bg-white overflow-hidden">
         {!transfers.length ? <EmptyState title="No bank transfers" /> : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-xs sm:text-sm">
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
                   {['Transfer Date','Bank','Account Last 4','Amount (PHP)','Status',''].map(col => (
@@ -193,8 +193,10 @@ function BankTransfersTab() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <button onClick={() => openEdit(t)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
-                      <button onClick={() => handleDelete(t)} className="ml-3 text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => openEdit(t)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                        <button onClick={() => handleDelete(t)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -207,7 +209,7 @@ function BankTransfersTab() {
       {modalOpen && (
         <Modal title={editing ? 'Edit Bank Transfer' : 'Add Bank Transfer'} onClose={() => setModalOpen(false)}>
           <form onSubmit={handleSave} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Amount (PHP)">
                 <input type="number" step="0.01" required value={form.amount_php} onChange={set('amount_php')} className={INPUT} />
               </Field>
@@ -215,7 +217,7 @@ function BankTransfersTab() {
                 <input type="datetime-local" required value={form.transfer_date} onChange={set('transfer_date')} className={INPUT} />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Bank Name">
                 <input type="text" value={form.bank_name} onChange={set('bank_name')} className={INPUT} />
               </Field>
@@ -373,11 +375,11 @@ function ExpensesTab() {
         </div>
       )}
 
-      <div className="flex justify-end">
-        <button onClick={handleExport} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+      <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button onClick={handleExport} className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
           Export CSV
         </button>
-        <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
+        <button onClick={openAdd} className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors sm:w-auto">
           + Add Expense
         </button>
       </div>
@@ -385,7 +387,7 @@ function ExpensesTab() {
       <div className="rounded-xl shadow-sm border border-gray-100 bg-white overflow-hidden">
         {!expenses.length ? <EmptyState title="No expenses recorded" /> : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-xs sm:text-sm">
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
                   {['Date','Category','Description','Amount (PHP)','Source',''].map(col => (
@@ -404,8 +406,10 @@ function ExpensesTab() {
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPHP(exp.amount_php)}</td>
                     <td className="px-4 py-3 text-gray-500">{exp.source || '—'}</td>
                     <td className="px-4 py-3">
-                      <button onClick={() => openEdit(exp)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
-                      <button onClick={() => handleDelete(exp)} className="ml-3 text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => openEdit(exp)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                        <button onClick={() => handleDelete(exp)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -418,7 +422,7 @@ function ExpensesTab() {
       {modalOpen && (
         <Modal title={editing ? 'Edit Expense' : 'Add Expense'} onClose={() => setModalOpen(false)}>
           <form onSubmit={handleSave} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Category">
                 <select value={form.category} onChange={set('category')} className={INPUT}>
                   {EXPENSE_CATEGORIES.map(c => <option key={c}>{c}</option>)}
@@ -431,7 +435,7 @@ function ExpensesTab() {
             <Field label="Description">
               <input type="text" value={form.description} onChange={set('description')} className={INPUT} />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Amount (PHP)">
                 <input type="number" step="0.01" required value={form.amount_php} onChange={set('amount_php')} className={INPUT} />
               </Field>
@@ -559,11 +563,11 @@ function SubscriptionsTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <button onClick={handleExport} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+      <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+        <button onClick={handleExport} className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
           Export CSV
         </button>
-        <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
+        <button onClick={openAdd} className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors sm:w-auto">
           + Add Subscription
         </button>
       </div>
@@ -581,8 +585,10 @@ function SubscriptionsTab() {
                   <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${SUB_STATUS_STYLES[sub.status?.toLowerCase()] || 'bg-gray-100 text-gray-600'}`}>
                     {sub.status || 'Unknown'}
                   </span>
-                  <button onClick={() => openEdit(sub)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
-                  <button onClick={() => handleDelete(sub)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => openEdit(sub)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                    <button onClick={() => handleDelete(sub)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                  </div>
                 </div>
               </div>
               <div className="mt-3 space-y-1 text-sm text-gray-500">
@@ -600,7 +606,7 @@ function SubscriptionsTab() {
             <Field label="Service Name">
               <input type="text" required value={form.service_name} onChange={set('service_name')} className={INPUT} />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Amount (PHP)">
                 <input type="number" step="0.01" required value={form.amount_php} onChange={set('amount_php')} className={INPUT} />
               </Field>
@@ -612,7 +618,7 @@ function SubscriptionsTab() {
                 </select>
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Next Billing Date">
                 <input type="date" value={form.next_billing_date} onChange={set('next_billing_date')} className={INPUT} />
               </Field>
@@ -648,11 +654,11 @@ export default function Financial() {
   return (
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Financial" onRefresh={() => setRefreshKey(k => k+1)} />
-      <div className="flex-1 p-6 space-y-6">
-        <div className="flex border-b border-gray-200">
+      <div className="flex-1 p-4 space-y-6 sm:p-6">
+        <div className="flex overflow-x-auto border-b border-gray-200">
           {TABS.map((tab, idx) => (
             <button key={tab} onClick={() => setActiveTab(idx)}
-              className={`px-5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+               className={`whitespace-nowrap px-5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
                 activeTab === idx ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}>
               {tab}

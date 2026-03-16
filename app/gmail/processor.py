@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, date, timedelta
 
 from app import db
+from sqlalchemy.exc import IntegrityError
 from app.models.models import (
     Sale, Inventory, BankTransfer, BankTransferAllocation, Expense, EmailProcessingLog,
 )
@@ -641,6 +642,10 @@ def _serialize_parsed_data(data: dict) -> dict:
 
 def _write_log(gmail_message_id, email_type, status, parsed_data,
                error_message, record_type, record_id):
+    """
+    Persist processing metadata.
+    Duplicate gmail_message_id conflicts are treated as idempotent replays.
+    """
     try:
         log = EmailProcessingLog(
             gmail_message_id=gmail_message_id,
@@ -653,6 +658,13 @@ def _write_log(gmail_message_id, email_type, status, parsed_data,
         )
         db.session.add(log)
         db.session.commit()
+    except IntegrityError as e:
+        # Another worker/thread may have already logged this message.
+        if "email_processing_log_gmail_message_id_key" in str(e.orig):
+            logger.info(f"Skipping duplicate email log for message {gmail_message_id}")
+        else:
+            logger.warning(f"Integrity error while writing EmailProcessingLog for {gmail_message_id}: {e}")
+        db.session.rollback()
     except Exception as e:
         logger.error(f"Failed to write EmailProcessingLog: {e}")
         db.session.rollback()

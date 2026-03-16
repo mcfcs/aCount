@@ -50,5 +50,7 @@ export const scrapeEmails = (payload) => client.post('/gmail/scrape', payload).t
 export const getScrapeStatus = () => client.get('/gmail/scrape-status').then(r => r.data)
 export const cancelScrape = () => client.post('/gmail/scrape-cancel').then(r => r.data)
 export const resetDatabase = (payload) => client.post('/settings/reset', payload).then(r => r.data)
+export const getPhpRate = () => client.get('/settings/php-rate').then(r => r.data)
+export const setPhpRate = (payload) => client.put('/settings/php-rate', payload).then(r => r.data)
 
 export default client

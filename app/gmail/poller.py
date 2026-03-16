@@ -13,11 +13,13 @@ import logging
 import time
 import copy
 import threading
+from typing import Optional
 from datetime import datetime
 
 from app.gmail.auth import get_gmail_service
 from app.gmail.parsers import get_message_parts
 from app.gmail.processor import process_message
+from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +116,7 @@ def poll_once(app) -> dict:
             return {"status": "error", "error": str(e), "processed": 0}
 
         # Process oldest-first so state transitions flow correctly
-        messages = list(reversed(messages))
+        messages = list(reversed(_dedupe_message_ids(messages)))
 
         processed = 0
         results = []
@@ -138,6 +140,13 @@ def poll_once(app) -> dict:
                     if not state.get("history_id") or int(msg_history_id) > int(state["history_id"]):
                         state["history_id"] = msg_history_id
 
+            except HttpError as e:
+                status = getattr(getattr(e, "resp", None), "status", None)
+                if str(status) == "404":
+                    logger.warning(f"Skipping missing message {msg_id}: {e}")
+                    results.append({"message_id": msg_id, "status": "skipped", "reason": "not_found"})
+                else:
+                    logger.exception(f"Error processing message {msg_id}: {e}")
             except Exception as e:
                 logger.exception(f"Error processing message {msg_id}: {e}")
 
@@ -301,7 +310,7 @@ def _scrape_date_range_internal(
 
         # Gmail returns newest-first; reverse to process oldest-first so the
         # state machine flows correctly: Sale → Confirmation → Shipped → Completed
-        message_ids = list(reversed(message_ids))
+        message_ids = list(reversed(_dedupe_message_ids(message_ids)))
 
         processed = 0
         skipped = 0
@@ -340,6 +349,14 @@ def _scrape_date_range_internal(
                         state["history_id"] = msg_history_id
                         _save_state(state)
 
+            except HttpError as e:
+                status = getattr(getattr(e, "resp", None), "status", None)
+                if str(status) == "404":
+                    logger.warning(f"Skipping missing message {msg_id}: {e}")
+                    results.append({"message_id": msg_id, "status": "skipped", "reason": "not_found"})
+                    skipped += 1
+                else:
+                    logger.exception(f"Error processing message {msg_id}: {e}")
             except Exception as e:
                 logger.exception(f"Error processing message {msg_id}: {e}")
             if progress_cb:
@@ -423,6 +440,17 @@ def start_scrape_date_range(app, after: str, before: str = None, force: bool = F
     )
     thread.start()
     return True
+
+
+def _dedupe_message_ids(message_ids):
+    seen = set()
+    deduped = []
+    for msg_id in message_ids:
+        if msg_id in seen:
+            continue
+        seen.add(msg_id)
+        deduped.append(msg_id)
+    return deduped
 
 # =============================================================================
 # Background polling thread

@@ -52,7 +52,7 @@ function ScrapeProgressIndicator() {
   const total = Number(status.total_fetched || 0)
 
   return (
-    <div className="fixed left-4 bottom-4 z-50 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs text-blue-700 shadow-md">
+    <div className="fixed left-3 right-3 bottom-4 z-50 mx-auto max-w-[95vw] rounded-lg border border-blue-200 bg-white px-3 py-2 text-[11px] text-blue-700 shadow-md sm:left-4 sm:right-auto sm:text-xs">
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 animate-pulse rounded-full bg-blue-600" />
         <span>
@@ -73,12 +73,47 @@ function ScrapeProgressIndicator() {
 }
 
 export default function App() {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth >= 1024) {
+        setMobileMenuOpen(false)
+      }
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   return (
     <BrowserRouter>
       <div className="flex min-h-screen bg-gray-50">
-        <Sidebar />
+        <button
+          type="button"
+          aria-label="Open navigation"
+          className="lg:hidden fixed left-3 bottom-3 z-50 rounded-lg border border-gray-200 bg-white px-2 py-2 text-gray-700 shadow-sm"
+          onClick={() => setMobileMenuOpen((prev) => !prev)}
+        >
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+
+        {mobileMenuOpen && (
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+        )}
+
+        <Sidebar
+          isOpen={mobileMenuOpen}
+          onClose={() => setMobileMenuOpen(false)}
+        />
         {/* Main content offset by sidebar width */}
-        <div className="ml-60 flex-1 min-w-0">
+        <div className="flex-1 min-w-0 lg:ml-72">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/sales" element={<Sales />} />
@@ -92,3 +127,4 @@ export default function App() {
     </BrowserRouter>
   )
 }
+

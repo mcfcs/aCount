@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { getPhpRate, setPhpRate } from '../services/api'
 
 export const FX_RATE_STORAGE_KEY = 'acount_php_estimate_rate'
 export const DEFAULT_PHP_ESTIMATE_RATE = 56
@@ -14,15 +15,29 @@ export const readPhpEstimateRate = () => {
   return toPhpRateNumber(window.localStorage.getItem(FX_RATE_STORAGE_KEY))
 }
 
-export const writePhpEstimateRate = (value) => {
+const writeRateLocally = (value) => {
   if (typeof window === 'undefined') return false
 
   const rate = toPhpRateNumber(value)
-  if (!Number.isFinite(rate) || rate <= 0) return false
 
   window.localStorage.setItem(FX_RATE_STORAGE_KEY, String(rate))
   window.dispatchEvent(new CustomEvent(FX_RATE_CHANGED_EVENT, { detail: { rate } }))
-  return true
+  return rate
+}
+
+export const writePhpEstimateRate = async (value) => {
+  const rate = toPhpRateNumber(value)
+  if (!Number.isFinite(rate) || rate <= 0) return false
+
+  try {
+    const data = await setPhpRate({ rate })
+    const savedRate = toPhpRateNumber(data?.rate)
+    writeRateLocally(savedRate)
+    return true
+  } catch {
+    writeRateLocally(rate)
+    return true
+  }
 }
 
 export const formatPhpRate = (value) => {
@@ -41,6 +56,22 @@ export const usePhpEstimateRate = () => {
   const [rate, setRate] = useState(() => readPhpEstimateRate())
 
   useEffect(() => {
+    let mounted = true
+
+    const syncWithApi = async () => {
+      try {
+        const data = await getPhpRate()
+        if (!mounted) return
+        const remoteRate = toPhpRateNumber(data?.rate)
+        writeRateLocally(remoteRate)
+        setRate(remoteRate)
+      } catch {
+        // Backend may be temporarily unavailable or migration not run yet.
+      }
+    }
+
+    syncWithApi()
+
     const onStorageRate = (event) => {
       if (event.key && event.key !== FX_RATE_STORAGE_KEY) return
       setRate(readPhpEstimateRate())
@@ -57,6 +88,7 @@ export const usePhpEstimateRate = () => {
     return () => {
       window.removeEventListener('storage', onStorageRate)
       window.removeEventListener(FX_RATE_CHANGED_EVENT, onCustomRate)
+      mounted = false
     }
   }, [])
 

@@ -195,8 +195,8 @@ export default function Inventory() {
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Inventory" onRefresh={fetchData} loading={loading} />
 
-      <div className="flex-1 p-6 space-y-6">
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+      <div className="flex-1 p-4 space-y-6 sm:p-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <KPICard label="Total Items" value={items.length} />
           <KPICard label="Available" value={items.filter(i => i.status === 'Available').length} valueClassName="text-green-600" />
           <KPICard label="Sold" value={items.filter(i => i.status === 'Sold').length} valueClassName="text-blue-600" />
@@ -204,21 +204,21 @@ export default function Inventory() {
           <KPICard label="Total Cost Value" value={formatPHP(totalValue)} />
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <input type="text" placeholder="Search name or SKU…" value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto" />
           <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400">
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto">
             <option value="">All Statuses</option>
             {ALL_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
           <button onClick={handleExport}
-            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+            className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
             Export CSV
           </button>
           <button onClick={openAdd}
-            className="ml-auto rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
+            className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors sm:ml-auto sm:w-auto">
             + Add Item
           </button>
         </div>
@@ -229,7 +229,7 @@ export default function Inventory() {
           : !filtered.length ? <EmptyState title="No inventory items" message="Try adjusting your filters." />
           : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
                     {['SKU','Shoe Name','Size','Status','Purchase Cost','Listed Price','Date Purchased','Source','Linked Sale',''].map(col => (
@@ -263,8 +263,10 @@ export default function Inventory() {
                         <td className="px-4 py-3 text-gray-500">{item.source || '—'}</td>
                         <td className="px-4 py-3 text-gray-500 font-mono text-xs">{item.linked_sale_id || '—'}</td>
                         <td className="px-4 py-3">
-                        <button onClick={() => openEdit(item)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
-                        <button onClick={() => handleDelete(item)} className="ml-3 text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                          <div className="flex items-center gap-3">
+                            <button onClick={() => openEdit(item)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                            <button onClick={() => handleDelete(item)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -282,7 +284,7 @@ export default function Inventory() {
             <Field label="Shoe Name">
               <input type="text" required value={form.shoe_name} onChange={set('shoe_name')} className={INPUT} />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="SKU">
                 <input type="text" required value={form.sku} onChange={set('sku')} className={INPUT} />
               </Field>
@@ -290,7 +292,7 @@ export default function Inventory() {
                 <input type="number" step="0.5" required value={form.size} onChange={set('size')} className={INPUT} />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Purchase Cost (PHP)">
                 <input type="number" step="0.01" required value={form.purchase_cost} onChange={set('purchase_cost')} className={INPUT} />
               </Field>
@@ -298,7 +300,7 @@ export default function Inventory() {
                 <input type="number" step="0.01" value={form.listed_price} onChange={set('listed_price')} className={INPUT} />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Date Purchased">
                 <input type="datetime-local" required value={form.date_purchased} onChange={set('date_purchased')} className={INPUT} />
               </Field>

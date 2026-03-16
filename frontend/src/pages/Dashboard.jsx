@@ -62,14 +62,14 @@ export default function Dashboard() {
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Dashboard" onRefresh={fetchAll} loading={loading} />
 
-      <div className="flex-1 p-6 space-y-6">
+      <div className="flex-1 space-y-6 p-4 sm:p-6">
         {/* KPI Row */}
         {loading && !summary ? (
           <LoadingSpinner className="py-8" />
         ) : summaryError ? (
           <p className="text-sm text-red-500">{summaryError}</p>
         ) : (
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
             <KPICard
               label="Total Revenue"
               value={summary ? formatPHP(summary.total_revenue_php) : '—'}
@@ -106,7 +106,7 @@ export default function Dashboard() {
         )}
 
         {/* Charts + Alerts Row */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="rounded-xl shadow-sm border border-gray-100 bg-white p-5">
             <h2 className="mb-4 text-sm font-semibold text-gray-700">Sales by Status</h2>
             <SalesByStatus sales={sales} loading={loading} />
