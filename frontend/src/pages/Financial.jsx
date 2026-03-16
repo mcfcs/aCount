@@ -5,6 +5,7 @@ import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
+import { exportToCsv } from '../utils/csv'
 import {
   getBankTransfers, getBankTransfersSummary, createBankTransfer, updateBankTransfer,
   getExpenses, getExpensesSummary, createExpense, updateExpense, deleteExpense, deleteBankTransfer,
@@ -45,6 +46,13 @@ const TRANSFER_STATUS_STYLES = {
 }
 
 const EMPTY_TRANSFER = { amount_php: '', bank_name: '', account_last4: '', transfer_date: '', reconciliation_status: 'Unreconciled' }
+const BANK_TRANSFER_CSV_COLUMNS = [
+  { key: 'transfer_date', label: 'Transfer Date' },
+  { key: 'bank_name', label: 'Bank' },
+  { key: 'account_last4', label: 'Account Last 4' },
+  { key: 'amount_php', label: 'Amount (PHP)' },
+  { key: 'reconciliation_status', label: 'Reconciliation Status' },
+]
 
 function BankTransfersTab() {
   const [transfers, setTransfers] = useState([])
@@ -78,6 +86,10 @@ function BankTransfersTab() {
     } catch (err) {
       setError(err?.response?.data?.error || 'Delete failed')
     }
+  }
+
+  const handleExport = () => {
+    exportToCsv('bank-transfers-export.csv', transfers, BANK_TRANSFER_CSV_COLUMNS)
   }
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))
@@ -122,11 +134,14 @@ function BankTransfersTab() {
         <KPICard label="Unreconciled" value={transfers.filter(t => t.reconciliation_status === 'Unreconciled').length} valueClassName="text-red-600" />
       </div>
 
-      <div className="flex justify-end">
-        <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
-          + Add Transfer
-        </button>
-      </div>
+        <div className="flex justify-end">
+          <button onClick={handleExport} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+            Export CSV
+          </button>
+          <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
+            + Add Transfer
+          </button>
+        </div>
 
       <div className="rounded-xl shadow-sm border border-gray-100 bg-white overflow-hidden">
         {!transfers.length ? <EmptyState title="No bank transfers" /> : (
@@ -205,6 +220,14 @@ function BankTransfersTab() {
 
 const EXPENSE_COLORS = ['#6366f1','#22c55e','#3b82f6','#f59e0b','#ef4444','#a855f7','#14b8a6','#f97316','#64748b']
 const EXPENSE_CATEGORIES = ['Platform Fee','Shipping','Storage','Supplies','Subscription','Other']
+const EXPENSE_CSV_COLUMNS = [
+  { key: 'expense_date', label: 'Expense Date' },
+  { key: 'category', label: 'Category' },
+  { key: 'description', label: 'Description' },
+  { key: 'amount_php', label: 'Amount (PHP)' },
+  { key: 'source', label: 'Source' },
+  { key: 'linked_sale_id', label: 'Linked Sale ID' },
+]
 
 const EMPTY_EXPENSE = { category: 'Platform Fee', description: '', amount_php: '', expense_date: '', source: '' }
 
@@ -246,6 +269,10 @@ function ExpensesTab() {
     } catch (err) {
       setError(err?.response?.data?.error || 'Delete failed')
     }
+  }
+
+  const handleExport = () => {
+    exportToCsv('expenses-export.csv', expenses, EXPENSE_CSV_COLUMNS)
   }
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))
@@ -298,6 +325,9 @@ function ExpensesTab() {
       )}
 
       <div className="flex justify-end">
+        <button onClick={handleExport} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+          Export CSV
+        </button>
         <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
           + Add Expense
         </button>
@@ -380,6 +410,13 @@ const SUB_STATUS_STYLES = {
   paused:    'bg-yellow-100 text-yellow-700',
   cancelled: 'bg-red-100 text-red-700',
 }
+const SUBSCRIPTION_CSV_COLUMNS = [
+  { key: 'service_name', label: 'Service Name' },
+  { key: 'amount_php', label: 'Amount (PHP)' },
+  { key: 'billing_cycle', label: 'Billing Cycle' },
+  { key: 'next_billing_date', label: 'Next Billing Date' },
+  { key: 'status', label: 'Status' },
+]
 
 const EMPTY_SUB = { service_name: '', amount_php: '', billing_cycle: 'monthly', next_billing_date: '', status: 'active' }
 
@@ -412,6 +449,10 @@ function SubscriptionsTab() {
     } catch (err) {
       setError(err?.response?.data?.error || 'Delete failed')
     }
+  }
+
+  const handleExport = () => {
+    exportToCsv('subscriptions-export.csv', subs, SUBSCRIPTION_CSV_COLUMNS)
   }
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))
@@ -447,6 +488,9 @@ function SubscriptionsTab() {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
+        <button onClick={handleExport} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+          Export CSV
+        </button>
         <button onClick={openAdd} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
           + Add Subscription
         </button>

@@ -4,6 +4,7 @@ import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
+import { exportToCsv } from '../utils/csv'
 import { getSales, getSalesSummary, createSale, updateSale, deleteSale } from '../services/api'
 
 function formatUSD(value) {
@@ -35,6 +36,21 @@ const SALE_TYPE_STYLES = {
   Consignment: 'bg-teal-100 text-teal-700',
 }
 const SALE_TYPE_LABELS = { Regular: 'Regular', FilledOffer: 'Offer', Consignment: 'Consignment' }
+const SALES_CSV_COLUMNS = [
+  { key: 'order_number', label: 'Order Number' },
+  { key: 'shoe_name', label: 'Shoe Name' },
+  { key: 'sku', label: 'SKU' },
+  { key: 'size', label: 'Size' },
+  { key: 'sale_type', label: 'Sale Type' },
+  { key: 'condition', label: 'Condition' },
+  { key: 'box_condition', label: 'Box Condition' },
+  { key: 'status', label: 'Status' },
+  { key: 'selling_price', label: 'Selling Price (USD)' },
+  { key: 'amount_made', label: 'Amount Made (USD)' },
+  { key: 'sale_date', label: 'Sale Date' },
+  { key: 'inventory_match_status', label: 'Inventory Match Status' },
+  { key: 'notes', label: 'Notes' },
+]
 
 const ALL_STATUSES = ['Pending','Confirmed','Shipped','Completed','Cancelled','Attention Needed','Consigned','Returned']
 const ALL_SALE_TYPES = ['Regular', 'FilledOffer', 'Consignment']
@@ -166,6 +182,10 @@ export default function Sales() {
     }
   }
 
+  const handleExport = () => {
+    exportToCsv('sales-export.csv', filtered, SALES_CSV_COLUMNS)
+  }
+
   return (
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Sales" onRefresh={fetchData} loading={loading} />
@@ -192,6 +212,10 @@ export default function Sales() {
             <option value="">All Statuses</option>
             {ALL_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
+          <button onClick={handleExport}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+            Export CSV
+          </button>
           <button onClick={openAdd}
             className="ml-auto rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
             + Add Sale

@@ -4,6 +4,7 @@ import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
+import { exportToCsv } from '../utils/csv'
 import { getInventory, createInventoryItem, updateInventoryItem, deleteInventoryItem } from '../services/api'
 
 function formatPHP(value) {
@@ -47,6 +48,18 @@ const EMPTY_ITEM = {
   purchase_cost: '', listed_price: '', date_purchased: '',
   source: '', notes: '',
 }
+const INVENTORY_CSV_COLUMNS = [
+  { key: 'sku', label: 'SKU' },
+  { key: 'shoe_name', label: 'Shoe Name' },
+  { key: 'size', label: 'Size' },
+  { key: 'status', label: 'Status' },
+  { key: 'purchase_cost', label: 'Purchase Cost' },
+  { key: 'listed_price', label: 'Listed Price' },
+  { key: 'date_purchased', label: 'Date Purchased' },
+  { key: 'source', label: 'Source' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'linked_sale_id', label: 'Linked Sale ID' },
+]
 
 export default function Inventory() {
   const [items, setItems] = useState([])
@@ -148,6 +161,10 @@ export default function Inventory() {
     }
   }
 
+  const handleExport = () => {
+    exportToCsv('inventory-export.csv', filtered, INVENTORY_CSV_COLUMNS)
+  }
+
   return (
     <div className="flex flex-col min-h-screen bg-gray-50">
       <TopBar title="Inventory" onRefresh={fetchData} loading={loading} />
@@ -170,6 +187,10 @@ export default function Inventory() {
             <option value="">All Statuses</option>
             {ALL_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
+          <button onClick={handleExport}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+            Export CSV
+          </button>
           <button onClick={openAdd}
             className="ml-auto rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors">
             + Add Item
