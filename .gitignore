@@ -40,4 +40,4 @@ htmlcov/
 # Distribution
 *.tar.gz
 *.whl
-*.example
+.claude/settings.json

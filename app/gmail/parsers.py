@@ -9,10 +9,11 @@ and returns a dict of extracted fields. Missing fields are omitted (not None).
 import re
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from app.time_utils import PH_TIMEZONE
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,8 @@ def get_message_parts(gmail_message: dict) -> tuple[str, str, str, datetime | No
     if date_str:
         try:
             dt = parsedate_to_datetime(date_str)
-            # Convert to UTC-naive datetime
-            sent_at = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            # Convert to Manila-local naive datetime
+            sent_at = dt.astimezone(PH_TIMEZONE).replace(tzinfo=None)
         except Exception:
             pass
 

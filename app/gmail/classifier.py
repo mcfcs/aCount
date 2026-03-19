@@ -86,6 +86,9 @@ def _classify_alias(subject: str, body: str) -> str:
     if "buyer accepted" in subject:
         return "BuyerAccepted"
 
+    if "order #" in subject and " issue" in subject:
+        return "Cancelled"
+
     # "Order #XXXXXX Has Been Canceled"
     # Distinguish by body: presence of "you will be charged" → Confirmed fee
     if "has been canceled" in subject or "has been cancelled" in subject:

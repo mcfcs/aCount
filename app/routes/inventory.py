@@ -6,9 +6,47 @@ Spec references: Section 2.2, 5.1
 from flask import Blueprint, request, jsonify
 from app import db
 from app.models.models import Inventory, Sale
+from app.shoe_utils import ensure_shoe_exists
 from datetime import datetime
+from sqlalchemy import func
 
 inventory_bp = Blueprint("inventory", __name__)
+
+
+def _lowest_nonzero_purchase_cost(sku, exclude_sale_id=None, exclude_inventory_id=None):
+    """
+    Return the smallest non-zero purchase_cost across Inventory and Sales for the
+    same sku.
+    """
+    if not sku:
+        return None
+
+    inv_query = (
+        db.session.query(func.min(Inventory.purchase_cost))
+        .filter(
+            Inventory.sku == sku,
+            Inventory.purchase_cost.isnot(None),
+            Inventory.purchase_cost > 0,
+        )
+    )
+    if exclude_inventory_id is not None:
+        inv_query = inv_query.filter(Inventory.inventory_id != exclude_inventory_id)
+    inv_min = inv_query.scalar()
+
+    sale_query = (
+        db.session.query(func.min(Sale.purchase_cost))
+        .filter(
+            Sale.sku == sku,
+            Sale.purchase_cost.isnot(None),
+            Sale.purchase_cost > 0,
+        )
+    )
+    if exclude_sale_id is not None:
+        sale_query = sale_query.filter(Sale.sale_id != exclude_sale_id)
+    sale_min = sale_query.scalar()
+
+    values = [v for v in (inv_min, sale_min) if v is not None]
+    return float(min(values)) if values else None
 
 
 # ---- Validation helpers ---------------------------------------------------
@@ -62,6 +100,8 @@ def _parse_inventory_payload(data, is_update=False):
         parsed["source"] = data["source"]
     if "notes" in data:
         parsed["notes"] = data["notes"]
+    if "brand" in data:
+        parsed["brand"] = data["brand"]
 
     if errors:
         return None, errors
@@ -79,6 +119,16 @@ def list_inventory():
     query = Inventory.query
 
     # Filters
+    q = request.args.get("q")
+    if q:
+        keyword = f"%{q}%"
+        query = query.filter(
+            db.or_(
+                Inventory.sku.ilike(keyword),
+                Inventory.shoe_name.ilike(keyword),
+            )
+        )
+
     status = request.args.get("status")
     if status:
         query = query.filter(Inventory.status == status)
@@ -151,7 +201,15 @@ def create_inventory_item():
     if errors:
         return jsonify({"errors": errors}), 422
 
-    item = Inventory(**parsed)
+    ensure_shoe_exists(
+        parsed.get("sku"),
+        parsed.get("shoe_name"),
+        brand=parsed.get("brand"),
+    )
+
+    inventory_payload = dict(parsed)
+    inventory_payload.pop("brand", None)
+    item = Inventory(**inventory_payload)
     if "status" not in parsed:
         item.status = "Available"
 
@@ -184,6 +242,90 @@ def create_inventory_item():
     return jsonify(response), 201
 
 
+@inventory_bp.route("/bulk", methods=["POST"])
+def create_inventory_items():
+    """
+    POST /api/inventory/bulk
+    Creates inventory rows in bulk using:
+    {
+      "sku": "...",
+      "shoe_name": "...",
+      "purchase_cost": 0,
+      "date_purchased": "2026-03-19T00:00:00",
+      "items": [
+        {"size": 9, "quantity": 2},
+        {"size": 10.5, "quantity": 1}
+      ],
+      "status": "Available",
+      ...
+    }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Request body must be JSON."}), 400
+
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return jsonify({"error": "'items' must be a non-empty array."}), 422
+
+    created = []
+
+    common = dict(data)
+    common.pop("items", None)
+
+    if "size" in common:
+        return jsonify({"error": "'size' should be included inside each items entry, not at root."}), 422
+
+    common_payload, errors = _parse_inventory_payload(common, is_update=True)
+    if errors:
+        return jsonify({"errors": errors}), 422
+
+    missing = [field for field in ("sku", "shoe_name", "date_purchased", "purchase_cost") if field not in common_payload]
+    if missing:
+        return jsonify({"error": f"Missing required root fields: {', '.join(missing)}."}), 422
+
+    # Validate required root fields and ensure the shoe exists before creating rows.
+    # _parse_inventory_payload enforces these in create mode.
+    ensure_shoe_exists(
+        common_payload.get("sku"),
+        common_payload.get("shoe_name"),
+        brand=common_payload.get("brand"),
+    )
+    common_payload.pop("brand", None)
+
+    if "status" not in common_payload:
+        common_payload["status"] = "Available"
+
+    for idx, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            return jsonify({"error": f"items[{idx}] must be an object with size and quantity."}), 422
+
+        row = dict(common_payload)
+        row.update(raw)
+
+        quantity = row.pop("quantity", 1)
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            return jsonify({"error": f"items[{idx}].quantity must be an integer >= 1."}), 422
+
+        if quantity <= 0:
+            return jsonify({"error": f"items[{idx}].quantity must be at least 1."}), 422
+
+        row["quantity"] = quantity
+        parsed_row, row_errors = _parse_inventory_payload(row)
+        if row_errors:
+            return jsonify({"errors": [f"items[{idx}] {err}" for err in row_errors]}), 422
+
+        parsed_row.pop("quantity", None)
+        for _ in range(quantity):
+            created.append(Inventory(**parsed_row))
+            db.session.add(created[-1])
+
+    db.session.commit()
+    return jsonify({"items": [item.to_dict() for item in created], "count": len(created)}), 201
+
+
 @inventory_bp.route("/<int:inventory_id>", methods=["PUT", "PATCH"])
 def update_inventory_item(inventory_id):
     """PUT/PATCH /api/inventory/<id>"""
@@ -198,6 +340,10 @@ def update_inventory_item(inventory_id):
     parsed, errors = _parse_inventory_payload(data, is_update=True)
     if errors:
         return jsonify({"errors": errors}), 422
+
+    brand = parsed.pop("brand", None)
+    if brand is not None:
+        ensure_shoe_exists(parsed.get("sku"), parsed.get("shoe_name"), brand=brand)
 
     for key, value in parsed.items():
         setattr(item, key, value)
@@ -240,6 +386,12 @@ def link_inventory_to_sale(inventory_id, sale_id):
 
     item.status = "Sold"
     item.linked_sale_id = sale.sale_id
+    linked_cost = float(item.purchase_cost) if item.purchase_cost else 0
+    if linked_cost <= 0:
+            fallback_cost = _lowest_nonzero_purchase_cost(item.sku, exclude_sale_id=sale.sale_id, exclude_inventory_id=item.inventory_id)
+            sale.purchase_cost = fallback_cost if fallback_cost is not None else linked_cost
+    else:
+        sale.purchase_cost = linked_cost
     sale.inventory_match_status = "Matched"
 
     db.session.commit()

@@ -14,6 +14,7 @@ from app.models.models import (
   Sale,
   Subscription,
   EmailProcessingLog,
+  Shoe,
 )
 
 PHP_RATE_SETTING_KEY = "php_estimate_rate"
@@ -103,7 +104,6 @@ def reset_database():
             "bank_transfers": BankTransfer.query.delete(synchronize_session=False),
             "expenses": Expense.query.delete(synchronize_session=False),
             "sales": Sale.query.delete(synchronize_session=False),
-            "inventory": Inventory.query.delete(synchronize_session=False),
             "subscriptions": Subscription.query.delete(synchronize_session=False),
             "email_processing_log": EmailProcessingLog.query.delete(synchronize_session=False),
         }

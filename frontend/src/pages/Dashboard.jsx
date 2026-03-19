@@ -38,7 +38,9 @@ export default function Dashboard() {
 
       getDashboardAlerts()
         .then(data => setAlerts(Array.isArray(data) ? data : data.alerts || []))
-        .catch(err => setAlertsError(err?.response?.data?.error || 'Failed to load alerts')),
+        .catch(err => setAlertsError(
+          err?.response?.data?.error || err?.response?.data?.message || 'Failed to load alerts'
+        )),
 
       getSales({ per_page: 200 })
         .then(data => setSales(Array.isArray(data) ? data : data.sales || data.items || []))

@@ -24,9 +24,13 @@ export default function ActionItems({ alerts = [], loading = false, error = null
   if (loading) return <LoadingSpinner className="py-8" />
   if (error) return <p className="py-4 text-sm text-red-500">{error}</p>
 
+  const safeAlerts = Array.isArray(alerts)
+    ? alerts
+    : (alerts && Array.isArray(alerts.alerts) ? alerts.alerts : [])
+
   const grouped = {}
   for (const u of urgencyOrder) {
-    const items = alerts.filter(a => a.urgency === u)
+    const items = safeAlerts.filter(a => a.urgency === u)
     if (items.length) grouped[u] = items
   }
 

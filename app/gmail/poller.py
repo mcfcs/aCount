@@ -14,12 +14,12 @@ import time
 import copy
 import threading
 from typing import Optional
-from datetime import datetime
 
 from app.gmail.auth import get_gmail_service
 from app.gmail.parsers import get_message_parts
 from app.gmail.processor import process_message
 from googleapiclient.errors import HttpError
+from app.time_utils import now
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def poll_once(app) -> dict:
             except Exception as e:
                 logger.exception(f"Error processing message {msg_id}: {e}")
 
-        state["last_poll"] = datetime.utcnow().isoformat()
+        state["last_poll"] = now().isoformat()
         _save_state(state)
 
         logger.info(f"Poll complete: {processed} new emails processed.")
@@ -389,7 +389,7 @@ def start_scrape_date_range(app, after: str, before: str = None, force: bool = F
         _SCRAPE_STATUS["processed"] = 0
         _SCRAPE_STATUS["skipped"] = 0
         _SCRAPE_STATUS["error"] = None
-        _SCRAPE_STATUS["started_at"] = datetime.utcnow().isoformat()
+        _SCRAPE_STATUS["started_at"] = now().isoformat()
         _SCRAPE_STATUS["finished_at"] = None
 
     def _worker():
@@ -414,7 +414,7 @@ def start_scrape_date_range(app, after: str, before: str = None, force: bool = F
                     "processed": result.get("processed", 0),
                     "skipped": result.get("skipped", 0),
                     "total_fetched": result.get("total_fetched", 0),
-                    "finished_at": datetime.utcnow().isoformat(),
+                    "finished_at": now().isoformat(),
                 })
                 return
 
@@ -424,13 +424,13 @@ def start_scrape_date_range(app, after: str, before: str = None, force: bool = F
                 "skipped": result.get("skipped", 0),
                 "total_fetched": result.get("total_fetched", 0),
                 "error": result.get("error"),
-                "finished_at": datetime.utcnow().isoformat(),
+                "finished_at": now().isoformat(),
             })
         except Exception as exc:
             _set_scrape_status({
                 "running": False,
                 "error": str(exc),
-                "finished_at": datetime.utcnow().isoformat(),
+                "finished_at": now().isoformat(),
             })
 
     thread = threading.Thread(
@@ -503,3 +503,4 @@ def get_poller_status() -> dict:
         "last_history_id": state.get("history_id"),
         "poll_interval_seconds": int(os.getenv("GMAIL_POLL_INTERVAL_SECONDS", 300)),
     }
+

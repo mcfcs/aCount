@@ -7,9 +7,13 @@ from flask import Blueprint, request, jsonify
 from app import db
 from app.models.models import Sale, Inventory, Expense
 from datetime import datetime
+from sqlalchemy import func
+from app.time_utils import now, date_today
+from app.shoe_utils import ensure_shoe_exists
 
 sales_bp = Blueprint("sales", __name__)
 
+MATCH_ELIGIBLE_STATUSES = ("Pending", "Confirmed")
 
 # ---- Constants ------------------------------------------------------------
 
@@ -69,6 +73,11 @@ def _parse_sale_payload(data, is_update=False):
                 parsed[num_field] = float(data[num_field])
             except (ValueError, TypeError):
                 errors.append(f"'{num_field}' must be a number.")
+    if "purchase_cost" in data and data["purchase_cost"] is not None:
+        try:
+            parsed["purchase_cost"] = float(data["purchase_cost"])
+        except (ValueError, TypeError):
+            errors.append("'purchase_cost' must be a number.")
 
     # Datetimes
     for dt_field in ("sale_date", "confirmation_datetime", "shipment_deadline",
@@ -123,6 +132,42 @@ def _parse_sale_payload(data, is_update=False):
     return parsed, None
 
 
+def _lowest_nonzero_purchase_cost(sku, exclude_sale_id=None, exclude_inventory_id=None):
+    """
+    Return the smallest non-zero purchase_cost across both Inventory and Sales for
+    the same sku. Returns None when no value exists.
+    """
+    if not sku:
+        return None
+
+    inv_query = (
+        db.session.query(func.min(Inventory.purchase_cost))
+        .filter(
+            Inventory.sku == sku,
+            Inventory.purchase_cost.isnot(None),
+            Inventory.purchase_cost > 0,
+        )
+    )
+    if exclude_inventory_id is not None:
+        inv_query = inv_query.filter(Inventory.inventory_id != exclude_inventory_id)
+    inv_min = inv_query.scalar()
+
+    sale_query = (
+        db.session.query(func.min(Sale.purchase_cost))
+        .filter(
+            Sale.sku == sku,
+            Sale.purchase_cost.isnot(None),
+            Sale.purchase_cost > 0,
+        )
+    )
+    if exclude_sale_id is not None:
+        sale_query = sale_query.filter(Sale.sale_id != exclude_sale_id)
+    sale_min = sale_query.scalar()
+
+    values = [v for v in (inv_min, sale_min) if v is not None]
+    return float(min(values)) if values else None
+
+
 def _fifo_match(sku, size):
     """
     FIFO inventory matching (Spec Section 2.2.3):
@@ -146,6 +191,65 @@ def _restore_inventory(sale):
     for item in linked_items:
         item.status = "Available"
         item.linked_sale_id = None
+    if linked_items:
+        sale.inventory_match_status = "Unmatched"
+
+
+def _unmatch_sale_inventory(sale):
+    """
+    Break inventory linkage for a sale and return linked inventory count.
+    """
+    linked_items = Inventory.query.filter_by(linked_sale_id=sale.sale_id).all()
+    for item in linked_items:
+        item.linked_sale_id = None
+        if item.status == "Sold":
+            item.status = "Available"
+    sale.purchase_cost = None
+    sale.inventory_match_status = "Unmatched"
+    return len(linked_items)
+
+
+def _match_sale_inventory(sale):
+    """
+    Attempt FIFO match for a sale that is Pending/Confirmed only.
+    Skips if already matched.
+    """
+    if sale.inventory_match_status == "Matched":
+        return None
+    if sale.status not in MATCH_ELIGIBLE_STATUSES:
+        return None
+
+    matched_item = _fifo_match(sale.sku, sale.size)
+    if matched_item:
+        matched_item.status = "Sold"
+        matched_item.linked_sale_id = sale.sale_id
+        item_cost = float(matched_item.purchase_cost) if matched_item.purchase_cost else 0
+        if item_cost > 0:
+            sale.purchase_cost = item_cost
+        else:
+            fallback_cost = _lowest_nonzero_purchase_cost(sale.sku, exclude_sale_id=sale.sale_id, exclude_inventory_id=matched_item.inventory_id)
+            if fallback_cost is not None:
+                sale.purchase_cost = fallback_cost
+            else:
+                sale.purchase_cost = item_cost
+        sale.inventory_match_status = "Matched"
+    return matched_item
+
+
+def _remove_sale_inventory_from_active(sale):
+    """
+    Ensure a matched sale is reflected in non-active inventory.
+    If the item is still linked and Available (or already linked as Sold),
+    mark it as Sold.
+    """
+    linked_items = Inventory.query.filter_by(
+        linked_sale_id=sale.sale_id,
+        status="Available",
+    ).all()
+    if linked_items:
+        for item in linked_items:
+            item.status = "Sold"
+    return bool(linked_items)
 
 
 # ---- CRUD -----------------------------------------------------------------
@@ -220,6 +324,21 @@ def get_sale(sale_id):
     return jsonify(sale.to_dict()), 200
 
 
+@sales_bp.route("/pricing-suggestion", methods=["GET"])
+def get_pricing_suggestion():
+    """
+    GET /api/sales/pricing-suggestion
+    Query: sku
+    Returns lowest recorded non-zero purchase_cost from Inventory and Sales for same sku.
+    """
+    sku = request.args.get("sku")
+    if not sku:
+        return jsonify({"error": "'sku' is required."}), 400
+
+    estimated_cost = _lowest_nonzero_purchase_cost(sku.strip())
+    return jsonify({"estimated_purchase_cost": estimated_cost}), 200
+
+
 @sales_bp.route("", methods=["POST"])
 def create_sale():
     """
@@ -236,6 +355,12 @@ def create_sale():
     if errors:
         return jsonify({"errors": errors}), 422
 
+    ensure_shoe_exists(
+        parsed.get("sku"),
+        parsed.get("shoe_name"),
+        brand=None,
+    )
+
     sale = Sale(**parsed)
     if "status" not in parsed:
         sale.status = "Pending"
@@ -246,11 +371,11 @@ def create_sale():
     db.session.flush()
 
     # --- FIFO inventory match (Spec 2.2.3) ---
-    matched_item = _fifo_match(sale.sku, sale.size)
-    if matched_item:
-        matched_item.status = "Sold"
-        matched_item.linked_sale_id = sale.sale_id
-        sale.inventory_match_status = "Matched"
+    _match_sale_inventory(sale)
+
+    # --- Smart pricing fallback from historical non-zero costs ---
+    if sale.purchase_cost is None:
+        sale.purchase_cost = _lowest_nonzero_purchase_cost(sale.sku, exclude_sale_id=sale.sale_id)
 
     db.session.commit()
 
@@ -274,6 +399,14 @@ def update_sale(sale_id):
 
     for key, value in parsed.items():
         setattr(sale, key, value)
+
+    # Re-attempt matching only when status is updated into an active match state.
+    if "status" in parsed and parsed["status"] in MATCH_ELIGIBLE_STATUSES:
+        _match_sale_inventory(sale)
+
+    # Smart pricing fallback from historical non-zero costs.
+    if sale.purchase_cost is None:
+        sale.purchase_cost = _lowest_nonzero_purchase_cost(sale.sku, exclude_sale_id=sale.sale_id)
 
     db.session.commit()
     return jsonify(sale.to_dict()), 200
@@ -334,13 +467,14 @@ def transition_sale_status(sale_id):
 
     # Confirmed: store deadline and pickup info
     if new_status == "Confirmed":
+        _match_sale_inventory(sale)
         if "confirmation_datetime" in data:
             try:
                 sale.confirmation_datetime = datetime.fromisoformat(data["confirmation_datetime"])
             except ValueError:
                 pass
         else:
-            sale.confirmation_datetime = datetime.utcnow()
+            sale.confirmation_datetime = now()
         if "shipment_deadline" in data:
             try:
                 sale.shipment_deadline = datetime.fromisoformat(data["shipment_deadline"])
@@ -353,13 +487,14 @@ def transition_sale_status(sale_id):
 
     # Shipped
     elif new_status == "Shipped":
+        _remove_sale_inventory_from_active(sale)
         if "shipment_date" in data:
             try:
                 sale.shipment_date = datetime.fromisoformat(data["shipment_date"])
             except ValueError:
                 pass
         else:
-            sale.shipment_date = datetime.utcnow()
+            sale.shipment_date = now()
         if "tracking_number" in data:
             sale.tracking_number = data["tracking_number"]
 
@@ -369,9 +504,9 @@ def transition_sale_status(sale_id):
             try:
                 sale.completion_date = datetime.fromisoformat(data["completion_date"]).date()
             except ValueError:
-                sale.completion_date = datetime.utcnow().date()
+                sale.completion_date = date_today()
         else:
-            sale.completion_date = datetime.utcnow().date()
+            sale.completion_date = date_today()
         if "amount_made" in data:
             try:
                 sale.amount_made = float(data["amount_made"])
@@ -380,7 +515,7 @@ def transition_sale_status(sale_id):
 
     # Cancelled: restore inventory + optional fee (Spec Section 4.3)
     elif new_status == "Cancelled":
-        sale.cancellation_date = datetime.utcnow().date()
+        sale.cancellation_date = date_today()
         if "cancellation_type" in data:
             sale.cancellation_type = data["cancellation_type"]
         if "cancellation_date" in data:
@@ -408,7 +543,7 @@ def transition_sale_status(sale_id):
                 original_currency="USD",
                 amount_php=fee_php,
                 conversion_rate=conversion_rate,
-                expense_date=sale.cancellation_date or datetime.utcnow().date(),
+                expense_date=sale.cancellation_date or date_today(),
                 source="Alias",
                 linked_sale_id=sale.sale_id,
             )
@@ -425,7 +560,7 @@ def transition_sale_status(sale_id):
                 pass
         # Set 48-hour auto-discount deadline (Spec §3.3.4)
         from datetime import timedelta
-        sale.attention_needed_deadline = datetime.utcnow() + timedelta(hours=48)
+        sale.attention_needed_deadline = now() + timedelta(hours=48)
 
     # Consigned
     elif new_status == "Consigned":
@@ -465,8 +600,6 @@ def sales_summary():
     GET /api/sales/summary
     Dashboard KPIs: sales by status, totals, unmatched count.
     """
-    from sqlalchemy import func
-
     status_counts = (
         db.session.query(Sale.status, func.count(Sale.sale_id))
         .group_by(Sale.status)
@@ -494,3 +627,18 @@ def sales_summary():
         "unmatched_sales": unmatched,
         "completed_earnings_usd": float(total_amount_made_usd),
     }), 200
+
+
+@sales_bp.route("/<int:sale_id>/unmatch", methods=["POST"])
+def unmatch_sale(sale_id):
+    sale = db.session.get(Sale, sale_id)
+    if not sale:
+        return jsonify({"error": "Sale not found."}), 404
+
+    _unmatch_sale_inventory(sale)
+    db.session.commit()
+    return jsonify({
+        "message": "Sale inventory match has been removed.",
+        "sale": sale.to_dict(),
+    }), 200
+

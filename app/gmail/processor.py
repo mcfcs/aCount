@@ -14,17 +14,139 @@ import logging
 from datetime import datetime, date, timedelta
 
 from app import db
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from app.models.models import (
     Sale, Inventory, BankTransfer, BankTransferAllocation, Expense, EmailProcessingLog,
 )
 from app.gmail.classifier import classify_email
 from app.gmail import parsers
+from app.time_utils import now, date_today
+from app.shoe_utils import ensure_shoe_exists
 
 logger = logging.getLogger(__name__)
 
 # Issue-type keyword groups for Attention Needed branching (Spec §4.4)
-_MOLD_KEYWORDS = {"mold"}
+SALE_STATUS_HIERARCHY = [
+    "Pending",
+    "Confirmed",
+    "Shipped",
+    "Attention Needed",
+    "Completed",
+    "Cancelled",
+]
+SALE_STATUS_RANK = {status: idx for idx, status in enumerate(SALE_STATUS_HIERARCHY)}
+MATCH_ELIGIBLE_STATUSES = ("Pending", "Confirmed")
+
+
+def _can_advance_sale_status(current_status: str, next_status: str) -> bool:
+    """
+    Return True if next_status is forward progress for scrape-triggered updates.
+    Returned/Consigned are treated as terminal and should not be downgraded.
+    """
+    if current_status in {"Returned", "Consigned"}:
+        return False
+    if current_status == next_status:
+        return False
+    current_rank = SALE_STATUS_RANK.get(current_status, -1)
+    next_rank = SALE_STATUS_RANK.get(next_status)
+    if next_rank is None:
+        return False
+    return next_rank > current_rank
+
+
+def _lowest_nonzero_purchase_cost(sku):
+    """
+    Return the smallest non-zero purchase_cost for the same sku
+    across Inventory and Sales. Returns None when no value exists.
+    """
+    if not sku:
+        return None
+
+    inv_min = (
+        db.session.query(func.min(Inventory.purchase_cost))
+        .filter(
+            Inventory.sku == sku,
+            Inventory.purchase_cost.isnot(None),
+            Inventory.purchase_cost > 0,
+        )
+        .scalar()
+    )
+
+    sale_min = (
+        db.session.query(func.min(Sale.purchase_cost))
+        .filter(
+            Sale.sku == sku,
+            Sale.purchase_cost.isnot(None),
+            Sale.purchase_cost > 0,
+        )
+        .scalar()
+    )
+
+    values = [v for v in (inv_min, sale_min) if v is not None]
+    return float(min(values)) if values else None
+
+
+def _set_sale_status_if_advanced(sale: Sale, next_status: str) -> bool:
+    """
+    Set sale.status only if it's a forward transition.
+    Returns True only when the DB field changed.
+    """
+    if _can_advance_sale_status(sale.status, next_status):
+        sale.status = next_status
+        return True
+    return False
+def _match_sale_inventory(sale: Sale):
+    """
+    Attempt FIFO matching for a sale only when it is eligible.
+    """
+    if sale.inventory_match_status == "Matched":
+        return None
+    if sale.status not in MATCH_ELIGIBLE_STATUSES:
+        return None
+    if not sale.sku or sale.size is None:
+        return None
+
+    matched = (
+        Inventory.query
+        .filter_by(sku=sale.sku, size=sale.size, status="Available")
+        .order_by(Inventory.date_purchased.asc())
+        .first()
+    )
+    if matched:
+        matched.status = "Sold"
+        matched.linked_sale_id = sale.sale_id
+        sale.inventory_match_status = "Matched"
+        linked_cost = float(matched.purchase_cost) if matched.purchase_cost else 0
+        if linked_cost <= 0:
+            fallback_cost = _lowest_nonzero_purchase_cost(sale.sku)
+            sale.purchase_cost = fallback_cost if fallback_cost is not None else linked_cost
+        else:
+            sale.purchase_cost = linked_cost
+        logger.info(f"FIFO matched sale #{sale.order_number} -> inventory_id={matched.inventory_id}")
+    return matched
+
+
+def _remove_sale_inventory_from_active(sale: Sale):
+    """
+    Mark currently linked inventory as sold so it is removed from active stock.
+    """
+    linked_items = Inventory.query.filter_by(
+        linked_sale_id=sale.sale_id,
+        status="Available",
+    ).all()
+    for item in linked_items:
+        item.status = "Sold"
+
+
+def _apply_status_inventory_side_effects(sale: Sale, status_updated: bool, new_status: str):
+    if not status_updated:
+        return
+    if new_status == "Confirmed":
+        _match_sale_inventory(sale)
+    if new_status == "Shipped":
+        _remove_sale_inventory_from_active(sale)
+
 _WRONG_SIZE_SKU_KEYWORDS = {"wrong size", "wrong sku", "incorrect size", "incorrect sku"}
 
 
@@ -113,9 +235,7 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_
     elif email_type == "BuyerAccepted":
         data = parsers.parse_order_number_only(subject, body)
         parsed_data.update(data)
-        # Buyer accepted discount — sale resumes normal flow, no status change needed
-        logger.info(f"Buyer accepted for order {data.get('order_number')} — awaiting Completed email.")
-        return None
+        return _handle_buyer_accepted(data)
 
     elif email_type == "Cancelled":
         data = parsers.parse_cancellation(subject, body)
@@ -148,12 +268,30 @@ def _handle_sale(data: dict, sent_at=None):
 
     existing_sale = Sale.query.filter_by(order_number=order_number).first()
     if existing_sale:
+        created, _ = ensure_shoe_exists(
+            data.get("sku"),
+            data.get("shoe_name"),
+            brand=None,
+        )
+        if created:
+            db.session.commit()
+        if existing_sale.status in MATCH_ELIGIBLE_STATUSES and existing_sale.inventory_match_status != "Matched":
+            _match_sale_inventory(existing_sale)
+        if existing_sale.purchase_cost is None:
+            existing_sale.purchase_cost = _lowest_nonzero_purchase_cost(existing_sale.sku)
+        db.session.commit()
         logger.info(f"Sale #{order_number} already exists (sale_id={existing_sale.sale_id}).")
         return "Sale", existing_sale.sale_id
 
     # Consignment sales are auto-confirmed by Alias — no separate Confirmation email arrives
     sale_type = data.get("sale_type", "Regular")
     initial_status = "Confirmed" if sale_type == "Consignment" else "Pending"
+
+    created, _ = ensure_shoe_exists(
+        data.get("sku"),
+        data.get("shoe_name"),
+        brand=None,
+    )
 
     sale = Sale(
         order_number=order_number,
@@ -164,14 +302,31 @@ def _handle_sale(data: dict, sent_at=None):
         box_condition=data.get("box_condition"),
         selling_price=data.get("selling_price"),
         amount_made=data.get("amount_made"),
-        sale_date=sent_at or datetime.utcnow(),
+        sale_date=sent_at or now(),
         status=initial_status,
         sale_type=sale_type,
         inventory_match_status="Unmatched",
         platform="Alias",
     )
-    db.session.add(sale)
-    db.session.flush()
+    try:
+        db.session.add(sale)
+        db.session.flush()
+    except IntegrityError:
+        # Another thread/workflow already inserted this order_number.
+        # Keep operation idempotent by using the existing sale.
+        db.session.rollback()
+        existing_sale = Sale.query.filter_by(order_number=order_number).first()
+        if existing_sale:
+            logger.info(
+                f"Race condition on Sale #{order_number}; using existing sale_id={existing_sale.sale_id}"
+            )
+            if existing_sale.status in MATCH_ELIGIBLE_STATUSES and existing_sale.inventory_match_status != "Matched":
+                _match_sale_inventory(existing_sale)
+            if existing_sale.purchase_cost is None:
+                existing_sale.purchase_cost = _lowest_nonzero_purchase_cost(existing_sale.sku)
+            db.session.commit()
+            return "Sale", existing_sale.sale_id
+        raise
 
     # FIFO match (Spec 2.2.3)
     if sale.sku and sale.size:
@@ -186,6 +341,9 @@ def _handle_sale(data: dict, sent_at=None):
             matched.linked_sale_id = sale.sale_id
             sale.inventory_match_status = "Matched"
             logger.info(f"FIFO matched sale #{order_number} → inventory_id={matched.inventory_id}")
+
+    if sale.purchase_cost is None:
+        sale.purchase_cost = _lowest_nonzero_purchase_cost(sale.sku)
 
     # Same-day emails (Sale + Confirmation/Completed) may arrive out of order.
     # If those emails were processed before this Sale was created, back-fill them now.
@@ -207,14 +365,11 @@ def _handle_confirmation(data: dict):
     if not sale:
         return None
 
-    _STATUS_ORDER = ["Pending", "Confirmed", "Shipped", "Completed"]
-    current_rank = _STATUS_ORDER.index(sale.status) if sale.status in _STATUS_ORDER else -1
-    confirmed_rank = _STATUS_ORDER.index("Confirmed")
-    if current_rank < confirmed_rank:
-        sale.status = "Confirmed"
+    status_updated = _set_sale_status_if_advanced(sale, "Confirmed")
+    _apply_status_inventory_side_effects(sale, status_updated, "Confirmed")
 
     # Always update pickup/deadline fields regardless of status (re-scrape safe)
-    sale.confirmation_datetime = sale.confirmation_datetime or datetime.utcnow()
+    sale.confirmation_datetime = sale.confirmation_datetime or now()
     if data.get("shipment_deadline"):
         sale.shipment_deadline = data["shipment_deadline"]
     if data.get("pickup_address"):
@@ -225,7 +380,10 @@ def _handle_confirmation(data: dict):
         sale.amount_made = data["amount_made"]
 
     db.session.commit()
-    logger.info(f"Sale #{data.get('order_number')} → Confirmed (was {sale.status})")
+    if status_updated:
+        logger.info(f"Sale #{data.get('order_number')} transitioned to Confirmed")
+    else:
+        logger.info(f"Sale #{data.get('order_number')} confirmation fields updated (status unchanged)")
     return "Sale", sale.sale_id
 
 
@@ -235,12 +393,16 @@ def _handle_shipped(data: dict):
     if not sale:
         return None
 
-    if sale.status not in ("Completed", "Shipped", "Cancelled", "Returned"):
-        sale.status = "Shipped"
-        sale.shipment_date = sale.shipment_date or datetime.utcnow()
+    status_updated = _set_sale_status_if_advanced(sale, "Shipped")
+    if status_updated:
+        sale.shipment_date = sale.shipment_date or now()
+    _apply_status_inventory_side_effects(sale, status_updated, "Shipped")
 
     db.session.commit()
-    logger.info(f"Sale #{data.get('order_number')} → Shipped")
+    if status_updated:
+        logger.info(f"Sale #{data.get('order_number')} transitioned to Shipped")
+    else:
+        logger.info(f"Sale #{data.get('order_number')} already at or ahead of Shipped; no status change.")
     return "Sale", sale.sale_id
 
 
@@ -250,13 +412,40 @@ def _handle_completed(data: dict):
     if not sale:
         return None
 
-    sale.status = "Completed"
-    sale.completion_date = sale.completion_date or datetime.utcnow().date()
+    status_updated = _set_sale_status_if_advanced(sale, "Completed")
+    sale.completion_date = sale.completion_date or date_today()
     if data.get("amount_made"):
         sale.amount_made = data["amount_made"]
 
     db.session.commit()
-    logger.info(f"Sale #{data.get('order_number')} → Completed")
+    if status_updated:
+        logger.info(f"Sale #{data.get('order_number')} transitioned to Completed")
+    else:
+        logger.info(f"Sale #{data.get('order_number')} already at or beyond Completed; no status change.")
+    return "Sale", sale.sale_id
+
+
+def _handle_buyer_accepted(data: dict):
+    """Spec 4.3/4.4: update amount after buyer accepted discount offer."""
+    sale = _find_sale(data.get("order_number"))
+    if not sale:
+        return None
+
+    if data.get("amount_made") is not None:
+        accepted_amount = data["amount_made"]
+        if sale.amount_made is None or accepted_amount < float(sale.amount_made):
+            sale.amount_made = accepted_amount
+            db.session.commit()
+            logger.info(f"Updated amount_made for Sale #{data.get('order_number')} to {accepted_amount} from BuyerAccepted email")
+            return "Sale", sale.sale_id
+        logger.info(
+            f"Ignored higher/equal amount_made for Sale #{data.get('order_number')} "
+            f"from BuyerAccepted (existing={sale.amount_made}, incoming={accepted_amount})"
+        )
+        return "Sale", sale.sale_id
+
+    db.session.commit()
+    logger.info(f"No amount_made in BuyerAccepted email for Sale #{data.get('order_number')} (no change)")
     return "Sale", sale.sale_id
 
 
@@ -279,17 +468,11 @@ def _handle_attention_needed(data: dict):
 
     # Variant 1 — Buyer declined the offered discount; order cancelled by Alias
     if data.get("buyer_declined"):
-        sale.status = "Cancelled"
-        sale.cancellation_date = datetime.utcnow().date()
-        sale.cancellation_type = "Attention Needed"
-        _restore_inventory(sale)
-        db.session.commit()
-        logger.info(f"Sale #{sale.order_number} → Cancelled (buyer declined discount)")
-        return "Sale", sale.sale_id
+        return _handle_buyer_declined_no_reorder(sale)
 
-    # Variant 2 — Standard attention needed
     issue_type = (data.get("issue_type") or "").lower()
     sale.issue_type = data.get("issue_type")
+    status_updated = _set_sale_status_if_advanced(sale, "Attention Needed")
 
     # Path C — Mold
     if "mold" in issue_type:
@@ -300,23 +483,27 @@ def _handle_attention_needed(data: dict):
         return _handle_wrong_size_sku_issue(sale)
 
     # Path A — Used Product / Authentication Issue (default)
-    sale.status = "Attention Needed"
-    sale.attention_needed_deadline = datetime.utcnow() + timedelta(hours=48)
-    db.session.commit()
-    logger.info(
-        f"Sale #{data.get('order_number')} → Attention Needed (used product/auth issue), "
-        f"deadline={sale.attention_needed_deadline.isoformat()}"
-    )
-    return "Sale", sale.sale_id
+    if status_updated:
+        sale.attention_needed_deadline = sale.attention_needed_deadline or (
+            now() + timedelta(hours=48)
+        )
 
+    db.session.commit()
+    if status_updated:
+        logger.info(f"Sale #{data.get('order_number')} transitioned to Attention Needed")
+    else:
+        logger.info(f"Sale #{data.get('order_number')} already at or beyond Attention Needed; no status change.")
+    return "Sale", sale.sale_id
 
 def _handle_mold_issue(sale: Sale):
     """
     Spec 4.4 Path C — Mold: cancel immediately, restore inventory, create fee placeholder.
     Fee amount is not specified in the spec — created with $0 for manual update.
     """
-    sale.status = "Cancelled"
-    sale.cancellation_date = datetime.utcnow().date()
+    if not _set_sale_status_if_advanced(sale, "Cancelled"):
+        return "Sale", sale.sale_id
+
+    sale.cancellation_date = date_today()
     sale.cancellation_type = "Attention Needed"
 
     _restore_inventory(sale)
@@ -327,7 +514,7 @@ def _handle_mold_issue(sale: Sale):
         amount_original=0,
         original_currency="USD",
         amount_php=0,
-        expense_date=date.today(),
+        expense_date=date_today(),
         source="Alias",
         linked_sale_id=sale.sale_id,
     )
@@ -342,8 +529,10 @@ def _handle_wrong_size_sku_issue(sale: Sale):
     Spec 4.4 Path B — Wrong Size/SKU:
     Auto-consign inventory, cancel original sale.
     """
-    sale.status = "Cancelled"
-    sale.cancellation_date = datetime.utcnow().date()
+    if not _set_sale_status_if_advanced(sale, "Cancelled"):
+        return "Sale", sale.sale_id
+
+    sale.cancellation_date = date_today()
     sale.cancellation_type = "Attention Needed"
 
     # Consign the linked inventory item (Spec 2.2.2: Sold → Consigned)
@@ -374,15 +563,14 @@ def _handle_cancellation(data: dict):
         return None
 
     # Already cancelled (e.g. buyer-declined Attention Needed email processed first)
-    if sale.status == "Cancelled":
-        logger.info(f"Sale #{data.get('order_number')} already Cancelled — skipping.")
+    if not _set_sale_status_if_advanced(sale, "Cancelled"):
+        logger.info(f"Sale #{data.get('order_number')} already at or beyond Cancelled; no status change.")
         return "Sale", sale.sale_id
 
     cancellation_type = data.get("cancellation_type", "Unconfirmed")
     fee_amount = data.get("fee_amount")
 
-    sale.status = "Cancelled"
-    sale.cancellation_date = datetime.utcnow().date()
+    sale.cancellation_date = date_today()
     sale.cancellation_type = cancellation_type
     if fee_amount:
         sale.cancellation_fee = fee_amount
@@ -399,7 +587,7 @@ def _handle_cancellation(data: dict):
             original_currency="USD",
             amount_php=fee_amount * conversion_rate,
             conversion_rate=conversion_rate,
-            expense_date=date.today(),
+            expense_date=date_today(),
             source="Alias",
             linked_sale_id=sale.sale_id,
         )
@@ -411,44 +599,19 @@ def _handle_cancellation(data: dict):
     return "Sale", sale.sale_id
 
 
-def _handle_buyer_declined(sale: Sale):
-    """
-    Spec §2.1.3 / §4.4: Buyer declined discount after Attention Needed.
+def _handle_buyer_declined_no_reorder(sale: Sale):
+    """Handle buyer declined without creating a new re-order sale."""
+    if not _set_sale_status_if_advanced(sale, "Cancelled"):
+        return "Sale", sale.sale_id
 
-    1. Cancel original order (cancellation_type = Attention Needed).
-    2. Create new Sale with order_number = original + 1, parent_order_number = original.
-       New sale is Pending — seller will choose Consign or Return via the app.
-    """
-    sale.status = "Cancelled"
-    sale.cancellation_date = datetime.utcnow().date()
+    sale.cancellation_date = date_today()
     sale.cancellation_type = "Attention Needed"
 
     _restore_inventory(sale)
 
-    # New re-order (Spec: order# = original + 1)
-    new_order_number = sale.order_number + 1
-    if not Sale.query.filter_by(order_number=new_order_number).first():
-        reorder = Sale(
-            order_number=new_order_number,
-            parent_order_number=sale.order_number,
-            sku=sale.sku,
-            shoe_name=sale.shoe_name,
-            size=sale.size,
-            condition=sale.condition,
-            box_condition=sale.box_condition,
-            sale_date=datetime.utcnow(),
-            status="Pending",
-            inventory_match_status="Unmatched",
-            platform="Alias",
-            notes=f"Re-order: buyer declined discount on Order #{sale.order_number}. Awaiting Consign/Return.",
-        )
-        db.session.add(reorder)
-        logger.info(f"Created re-order #{new_order_number} (parent #{sale.order_number}) — awaiting Consign/Return")
-
     db.session.commit()
-    logger.info(f"Sale #{sale.order_number} → Cancelled (Buyer Declined)")
+    logger.info(f"Sale #{sale.order_number} -> Cancelled (Buyer Declined / Attention Needed)")
     return "Sale", sale.sale_id
-
 
 def _handle_bank_transfer(data: dict, sent_at=None):
     """
@@ -461,7 +624,7 @@ def _handle_bank_transfer(data: dict, sent_at=None):
         raise ValueError("Could not parse amount_php from bank transfer email.")
 
     # Use email sent date as the canonical transfer date
-    transfer_date = sent_at or data.get("transfer_date") or datetime.utcnow()
+    transfer_date = sent_at or data.get("transfer_date") or now()
 
     # Dedup: skip if a transfer with the same amount on the same day already exists
     existing = BankTransfer.query.filter(
@@ -559,8 +722,8 @@ def _apply_deferred_confirmation(sale: Sale, order_number: int):
         for log in deferred_logs:
             if log.parsed_data and log.parsed_data.get("order_number") == order_number:
                 data = log.parsed_data
-                sale.status = "Confirmed"
-                sale.confirmation_datetime = sale.confirmation_datetime or datetime.utcnow()
+                _set_sale_status_if_advanced(sale, "Confirmed")
+                sale.confirmation_datetime = sale.confirmation_datetime or now()
                 if data.get("shipment_deadline"):
                     try:
                         sale.shipment_deadline = datetime.fromisoformat(data["shipment_deadline"])
@@ -572,6 +735,7 @@ def _apply_deferred_confirmation(sale: Sale, order_number: int):
                     sale.pickup_window = data["pickup_window"]
                 if data.get("amount_made"):
                     sale.amount_made = float(data["amount_made"])
+                _apply_status_inventory_side_effects(sale, True, "Confirmed")
                 log.linked_record_id = sale.sale_id
                 log.linked_record_type = "Sale"
                 logger.info(f"Applied deferred confirmation to #{order_number}")
@@ -595,8 +759,8 @@ def _apply_deferred_completion(sale: Sale, order_number: int):
         for log in deferred_logs:
             if log.parsed_data and log.parsed_data.get("order_number") == order_number:
                 amount_made = log.parsed_data.get("amount_made")
-                sale.status = "Completed"
-                sale.completion_date = datetime.utcnow().date()
+                _set_sale_status_if_advanced(sale, "Completed")
+                sale.completion_date = date_today()
                 if amount_made:
                     sale.amount_made = float(amount_made)
                 # Link the log entry now that the sale exists
@@ -627,6 +791,8 @@ def _restore_inventory(sale: Sale):
     for item in linked_items:
         item.status = "Available"
         item.linked_sale_id = None
+    if linked_items:
+        sale.inventory_match_status = "Unmatched"
 
 
 def _serialize_parsed_data(data: dict) -> dict:
@@ -668,3 +834,7 @@ def _write_log(gmail_message_id, email_type, status, parsed_data,
     except Exception as e:
         logger.error(f"Failed to write EmailProcessingLog: {e}")
         db.session.rollback()
+
+
+
+

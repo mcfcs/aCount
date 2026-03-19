@@ -5,6 +5,8 @@ All entities from Technical Specification Section 5.
 
 from datetime import datetime, date
 from app import db
+from app.time_utils import now
+from sqlalchemy.orm import relationship
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +19,7 @@ class AppSetting(db.Model):
 
     key = db.Column(db.String(64), primary_key=True)
     value = db.Column(db.Numeric(10, 4), nullable=False)
-    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
 
     def to_dict(self):
         return {
@@ -28,6 +30,31 @@ class AppSetting(db.Model):
 
 
 # ---------------------------------------------------------------------------
+# Shoes (Section 5.9)
+# ---------------------------------------------------------------------------
+
+
+class Shoe(db.Model):
+    __tablename__ = "shoes"
+
+    shoe_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    sku = db.Column(db.String(100), nullable=False, unique=True)
+    brand = db.Column(db.String(50), nullable=False, default="Other")
+    name = db.Column(db.String(500), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
+
+    def to_dict(self):
+        return {
+            "shoe_id": self.shoe_id,
+            "sku": self.sku,
+            "brand": self.brand,
+            "name": self.name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 # Inventory (Section 5.1)
 # ---------------------------------------------------------------------------
 
@@ -49,8 +76,8 @@ class Inventory(db.Model):
     linked_sale_id  = db.Column(db.Integer, db.ForeignKey("sales.sale_id", ondelete="SET NULL"), nullable=True)
     source          = db.Column(db.String(255), nullable=True)
     notes           = db.Column(db.Text, nullable=True)
-    created_at      = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    updated_at      = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at      = db.Column(db.DateTime, nullable=False, default=now)
+    updated_at      = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
 
     # Relationship
     linked_sale = db.relationship("Sale", backref="inventory_items", foreign_keys=[linked_sale_id])
@@ -83,7 +110,7 @@ class Sale(db.Model):
     __tablename__ = "sales"
 
     sale_id                 = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    order_number            = db.Column(db.BigInteger, nullable=False)
+    order_number            = db.Column(db.BigInteger, nullable=False, unique=True)
     parent_order_number     = db.Column(db.BigInteger, nullable=True)
     platform                = db.Column(db.String(100), nullable=False, default="Alias")
     sale_type               = db.Column(db.String(20), nullable=True)   # Regular | FilledOffer | Consignment
@@ -93,6 +120,7 @@ class Sale(db.Model):
     condition               = db.Column(db.String(20), nullable=True)       # New | Used
     box_condition           = db.Column(db.String(30), nullable=True)       # Good Condition | No Box | Badly Damaged
     selling_price           = db.Column(db.Numeric(10, 2), nullable=True)   # USD
+    purchase_cost           = db.Column(db.Numeric(10, 2), nullable=True)   # PHP
     amount_made             = db.Column(db.Numeric(10, 2), nullable=True)   # USD
     sale_date               = db.Column(db.DateTime, nullable=False)
     status                  = db.Column(
@@ -119,8 +147,8 @@ class Sale(db.Model):
         default="Unmatched",
     )  # Matched | Unmatched
     notes                   = db.Column(db.Text, nullable=True)
-    created_at              = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    updated_at              = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at              = db.Column(db.DateTime, nullable=False, default=now)
+    updated_at              = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
 
     VALID_STATUSES = (
         "Pending", "Confirmed", "Shipped", "Completed",
@@ -144,6 +172,7 @@ class Sale(db.Model):
             "condition": self.condition,
             "box_condition": self.box_condition,
             "selling_price": float(self.selling_price) if self.selling_price else None,
+            "purchase_cost": float(self.purchase_cost) if self.purchase_cost else None,
             "amount_made": float(self.amount_made) if self.amount_made else None,
             "sale_date": self.sale_date.isoformat() if self.sale_date else None,
             "status": self.status,
@@ -185,7 +214,7 @@ class BankTransfer(db.Model):
         default="Unreconciled",
     )  # Reconciled | Partially Reconciled | Unreconciled
     notes                 = db.Column(db.Text, nullable=True)
-    created_at            = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    created_at            = db.Column(db.DateTime, nullable=False, default=now)
 
     allocations = db.relationship("BankTransferAllocation", backref="bank_transfer", cascade="all, delete-orphan")
 
@@ -244,7 +273,7 @@ class Expense(db.Model):
     source            = db.Column(db.String(255), nullable=True)
     linked_sale_id    = db.Column(db.Integer, db.ForeignKey("sales.sale_id", ondelete="SET NULL"), nullable=True)
     notes             = db.Column(db.Text, nullable=True)
-    created_at        = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    created_at        = db.Column(db.DateTime, nullable=False, default=now)
 
     linked_sale = db.relationship("Sale", backref="expenses", foreign_keys=[linked_sale_id])
 
@@ -286,8 +315,8 @@ class Subscription(db.Model):
     # Active | Paused | Cancelled
     payment_method    = db.Column(db.String(255), nullable=True)
     notes             = db.Column(db.Text, nullable=True)
-    created_at        = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    updated_at        = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at        = db.Column(db.DateTime, nullable=False, default=now)
+    updated_at        = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
 
     def to_dict(self):
         return {
@@ -317,7 +346,7 @@ class EmailProcessingLog(db.Model):
     gmail_message_id   = db.Column(db.String(255), nullable=False, unique=True)
     email_type         = db.Column(db.String(30), nullable=False)
     # Sale | Confirmation | Shipped | Completed | Cancelled | Attention | BankTransfer | Purchase | Subscription | Receipt | Other
-    processed_at       = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    processed_at       = db.Column(db.DateTime, nullable=False, default=now)
     parsed_data        = db.Column(db.JSON, nullable=True)
     status             = db.Column(db.String(20), nullable=False, default="Success")
     # Success | Failed | Skipped
@@ -337,3 +366,4 @@ class EmailProcessingLog(db.Model):
             "linked_record_type": self.linked_record_type,
             "linked_record_id": self.linked_record_id,
         }
+

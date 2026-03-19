@@ -5,7 +5,7 @@ import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
 import { exportToCsv } from '../utils/csv'
-import { getSales, getSalesSummary, createSale, updateSale, deleteSale } from '../services/api'
+import { getSales, getSalesSummary, getInventory, getPricingSuggestion, createSale, updateSale, deleteSale, linkInventoryToSale, unmatchSale } from '../services/api'
 import { usePhpEstimateRate, usdToPhp } from '../utils/exchangeRate'
 
 function formatUSD(value) {
@@ -16,6 +16,12 @@ function formatUSD(value) {
 function formatPHP(value) {
   const num = parseFloat(value) || 0
   return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(num)
+}
+
+function calculateProfitPhp(amountMade, purchaseCost, phpRate) {
+  const amountMadePhp = usdToPhp(amountMade, phpRate)
+  if (amountMadePhp == null || purchaseCost == null) return null
+  return parseFloat(amountMadePhp) - parseFloat(purchaseCost)
 }
 
 function formatDate(dateStr) {
@@ -55,12 +61,14 @@ const SALES_CSV_COLUMNS = [
   { key: 'status', label: 'Status' },
   { key: 'selling_price', label: 'Selling Price (USD)' },
   { key: 'amount_made', label: 'Amount Made (USD)' },
+  { key: 'purchase_cost', label: 'Purchase Cost (PHP)' },
   { key: 'sale_date', label: 'Sale Date' },
   { key: 'inventory_match_status', label: 'Inventory Match Status' },
   { key: 'notes', label: 'Notes' },
 ]
 
 const ALL_STATUSES = ['Pending','Confirmed','Shipped','Completed','Cancelled','Attention Needed','Consigned','Returned']
+const BUY_PRICE_ONLY_STATUSES = ['Shipped', 'Completed', 'Attention Needed', 'Cancelled']
 const ALL_SALE_TYPES = ['Regular', 'FilledOffer', 'Consignment']
 const PER_PAGE = 25
 
@@ -96,16 +104,14 @@ export default function Sales() {
   const [form, setForm] = useState(EMPTY_SALE)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
-
-  const applyFilters = useCallback((rows) => {
-    return rows.filter(s => {
-      const q = searchQuery.toLowerCase()
-      const oq = orderSearch.trim()
-      const nameMatch = !q || (s.shoe_name || '').toLowerCase().includes(q)
-      const orderMatch = !oq || String(s.order_number || '').includes(oq)
-      return nameMatch && orderMatch
-    })
-  }, [searchQuery, orderSearch])
+  const [matchModalOpen, setMatchModalOpen] = useState(false)
+  const [matchingSale, setMatchingSale] = useState(null)
+  const [matchCandidates, setMatchCandidates] = useState([])
+  const [selectedInventoryId, setSelectedInventoryId] = useState('')
+  const [manualPurchaseCost, setManualPurchaseCost] = useState('')
+  const [matchingLoading, setMatchingLoading] = useState(false)
+  const [matchError, setMatchError] = useState(null)
+  const [manualOnlyMatchMode, setManualOnlyMatchMode] = useState(false)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -113,6 +119,10 @@ export default function Sales() {
     try {
       const params = { page, per_page: PER_PAGE }
       if (statusFilter) params.status = statusFilter
+      const q = searchQuery.trim()
+      if (q) params.shoe_name = q
+      const oq = orderSearch.trim()
+      if (oq) params.order_number = oq
       const [salesData, summaryData] = await Promise.all([getSales(params), getSalesSummary()])
       const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
       const total = salesData.total || items.length
@@ -124,10 +134,13 @@ export default function Sales() {
     } finally {
       setLoading(false)
     }
-  }, [page, statusFilter])
+  }, [page, statusFilter, searchQuery, orderSearch])
 
   useEffect(() => { fetchData() }, [fetchData])
-  const filtered = applyFilters(sales)
+
+  useEffect(() => {
+    setPage(1)
+  }, [searchQuery, orderSearch, statusFilter])
 
   const fetchAllSalesForExport = useCallback(async () => {
     let pageNum = 1
@@ -136,6 +149,10 @@ export default function Sales() {
     while (true) {
       const params = { page: pageNum, per_page: perPage }
       if (statusFilter) params.status = statusFilter
+      const q = searchQuery.trim()
+      if (q) params.shoe_name = q
+      const oq = orderSearch.trim()
+      if (oq) params.order_number = oq
       const salesData = await getSales(params)
       const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
       const totalPages = salesData.pages || Math.ceil((salesData.total || 0) / perPage)
@@ -150,7 +167,7 @@ export default function Sales() {
       pageNum += 1
     }
     return allItems
-  }, [statusFilter])
+  }, [statusFilter, searchQuery, orderSearch])
 
   const openAdd = () => {
     setEditing(null)
@@ -217,13 +234,119 @@ export default function Sales() {
     }
   }
 
+  const handleUnmatch = async (sale) => {
+    if (!window.confirm(`Unmatch Order #${sale.order_number}? This will clear linked inventory and buying price.`)) return
+    try {
+      await unmatchSale(sale.sale_id)
+      fetchData()
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to unmatch sale.')
+    }
+  }
+
   const handleExport = async () => {
     try {
       const allSales = await fetchAllSalesForExport()
-      const allFiltered = applyFilters(allSales)
-      exportToCsv('sales-export.csv', allFiltered, SALES_CSV_COLUMNS)
+      exportToCsv('sales-export.csv', allSales, SALES_CSV_COLUMNS)
     } catch (err) {
       setError(err?.response?.data?.error || 'Failed to export sales data')
+    }
+  }
+
+  const openMatchModal = async (sale) => {
+    setMatchingSale(sale)
+    setSelectedInventoryId('')
+    setManualPurchaseCost(
+      sale?.purchase_cost != null ? String(sale.purchase_cost) : ''
+    )
+    setMatchError(null)
+    setMatchCandidates([])
+    setMatchingLoading(true)
+    setManualOnlyMatchMode(BUY_PRICE_ONLY_STATUSES.includes(sale.status))
+    setMatchModalOpen(true)
+      if (BUY_PRICE_ONLY_STATUSES.includes(sale.status)) {
+      try {
+        const suggestion = await getPricingSuggestion({ sku: sale.sku })
+        const estimated = suggestion?.estimated_purchase_cost
+        if (estimated != null && sale?.purchase_cost == null) {
+          setManualPurchaseCost(String(estimated))
+        }
+      } catch (err) {
+        // Non-blocking: keep empty if no suggestion is found.
+        setMatchError(null)
+      } finally {
+        setMatchingLoading(false)
+      }
+      return
+    }
+
+    try {
+      const filters = {}
+      if (sale?.sku) filters.sku = sale.sku
+      if (sale?.size != null) filters.size = sale.size
+      filters.status = 'Available'
+      const data = await getInventory(filters)
+      const items = Array.isArray(data) ? data : data.items || []
+      const filtered = items.filter(item => item.sku === sale.sku && Number(item.size) === Number(sale.size))
+      setMatchCandidates(filtered)
+      if (filtered.length === 0) {
+        setMatchError('No exact available inventory match found.')
+      }
+      if (sale?.purchase_cost == null) {
+        const suggestion = await getPricingSuggestion({ sku: sale.sku })
+        const estimated = suggestion?.estimated_purchase_cost
+        if (estimated != null) {
+          setManualPurchaseCost(current => current || String(estimated))
+        }
+      }
+    } catch (err) {
+      setMatchError(err?.response?.data?.error || 'Failed to load matching inventory.')
+    } finally {
+      setMatchingLoading(false)
+    }
+  }
+
+  const closeMatchModal = () => {
+    setMatchModalOpen(false)
+    setMatchingSale(null)
+    setMatchCandidates([])
+    setMatchError(null)
+    setSelectedInventoryId('')
+    setManualPurchaseCost('')
+    setManualOnlyMatchMode(false)
+  }
+
+  const handleMatchSubmit = async (e) => {
+    e.preventDefault()
+    if (!matchingSale) return
+    setMatchingLoading(true)
+    setMatchError(null)
+    try {
+      if (manualOnlyMatchMode) {
+        const value = manualPurchaseCost !== '' ? Number(manualPurchaseCost) : NaN
+        if (!Number.isFinite(value)) {
+          setMatchError('Enter a valid buying price.')
+          setMatchingLoading(false)
+          return
+        }
+        await updateSale(matchingSale.sale_id, { purchase_cost: value })
+      } else if (selectedInventoryId) {
+        await linkInventoryToSale(Number(selectedInventoryId), matchingSale.sale_id)
+      } else {
+        const value = manualPurchaseCost !== '' ? Number(manualPurchaseCost) : NaN
+        if (!Number.isFinite(value)) {
+          setMatchError('Enter a valid buying price when not selecting an inventory item.')
+          setMatchingLoading(false)
+          return
+        }
+        await updateSale(matchingSale.sale_id, { purchase_cost: value })
+      }
+      closeMatchModal()
+      await fetchData()
+    } catch (err) {
+      setMatchError(err?.response?.data?.error || err?.response?.data?.errors?.join(', ') || 'Failed to update matching.')
+    } finally {
+      setMatchingLoading(false)
     }
   }
 
@@ -273,19 +396,31 @@ export default function Sales() {
         <div className="rounded-xl shadow-sm border border-gray-100 bg-white overflow-hidden">
           {loading ? <LoadingSpinner className="py-12" />
           : error ? <p className="p-6 text-sm text-red-500">{error}</p>
-          : !filtered.length ? <EmptyState title="No sales found" message="Try adjusting your filters." />
+          : !sales.length ? <EmptyState title="No sales found" message="Try adjusting your filters." />
           : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    {['Order #','Shoe Name','Type','SKU','Size','Status','Selling Price','Amount Made','Amount Made (PHP est.)','Sale Date','Inv. Match',''].map(col => (
-                      <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
-                    ))}
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Order #</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Shoe Name</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Type</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">SKU</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Size</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Status</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Amount Made</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Amount Made (PHP est.)</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Purchase Cost (PHP)</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Profit (PHP)</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Sale Date</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-center">Inv. Match</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-center">Match</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-center">Edit</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-center">Delete</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {filtered.map((sale, idx) => (
+                {sales.map((sale, idx) => (
                     <tr key={sale.sale_id || idx} className="hover:bg-gray-50 transition-colors">
                       <td className="px-4 py-3 font-mono text-xs text-gray-600 whitespace-nowrap">{sale.order_number || '—'}</td>
                       <td className="px-4 py-3 font-medium text-gray-900 max-w-xs truncate">{sale.shoe_name || '—'}</td>
@@ -303,35 +438,112 @@ export default function Sales() {
                           {sale.status || '—'}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.selling_price != null ? formatUSD(sale.selling_price) : '—'}</td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.amount_made != null ? formatUSD(sale.amount_made) : '—'}</td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
                         {usdToPhp(sale.amount_made, phpRate) != null ? formatPHP(usdToPhp(sale.amount_made, phpRate)) : '—'}
                       </td>
+                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.purchase_cost != null ? formatPHP(sale.purchase_cost) : '—'}</td>
+                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
+                        {calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate) != null
+                          ? formatPHP(calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate))
+                          : '—'}
+                      </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(sale.sale_date)}</td>
-                      <td className="px-4 py-3 text-gray-500">
+                    <td className="px-4 py-3 text-center text-gray-500">
                         {sale.inventory_match_status === 'Matched'
                           ? <span className="text-green-600 font-medium">Matched</span>
                           : <span className="text-gray-400">Unmatched</span>}
                       </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <button onClick={() => openEdit(sale)}
-                          className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
-                          Edit
+                    <td className="px-4 py-3 text-center">
+                      {sale.inventory_match_status === 'Matched' ? (
+                        <button onClick={() => handleUnmatch(sale)}
+                          className="text-xs text-amber-700 hover:text-amber-900 font-medium">
+                          Unmatch
                         </button>
-                        <button onClick={() => handleDelete(sale)}
-                          className="text-xs text-red-600 hover:text-red-800 font-medium">
-                          Delete
+                      ) : BUY_PRICE_ONLY_STATUSES.includes(sale.status) ? (
+                        <button onClick={() => openMatchModal(sale)}
+                          className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
+                          {sale.purchase_cost != null ? 'Edit Buying Price' : 'Add Buying Price'}
                         </button>
-                      </div>
+                      ) : (
+                        <button onClick={() => openMatchModal(sale)}
+                          className="text-xs text-green-700 hover:text-green-900 font-medium">
+                          Match
+                        </button>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <button onClick={() => openEdit(sale)}
+                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
+                        Edit
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <button onClick={() => handleDelete(sale)}
+                        className="text-xs text-red-600 hover:text-red-800 font-medium">
+                        Delete
+                      </button>
                     </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+        </div>
+      )}
+
+      {matchModalOpen && (
+        <Modal title={manualOnlyMatchMode ? `Add Buying Price for Order #${matchingSale?.order_number ?? ''}` : `Match Inventory for Order #${matchingSale?.order_number ?? ''}`} onClose={closeMatchModal}>
+          <form onSubmit={handleMatchSubmit} className="space-y-4">
+            <p className="text-sm text-gray-600">
+              {manualOnlyMatchMode
+                ? 'No inventory matching is required for this status. Please enter the buying price in PHP.'
+                : 'Select the exact available inventory item, or enter a manual buying price if none exists.'}
+            </p>
+            {!manualOnlyMatchMode && (
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-600">Available Inventory Matches</label>
+              {matchingLoading ? (
+                  <p className="text-xs text-gray-500">Loading available matches...</p>
+              ) : matchCandidates.length ? (
+                <select value={selectedInventoryId} onChange={(e) => setSelectedInventoryId(e.target.value)} className={INPUT}>
+                  <option value="">-- Select exact inventory item --</option>
+                  {matchCandidates.map(item => (
+                    <option key={item.inventory_id} value={item.inventory_id}>
+                      #{item.inventory_id} | {item.sku} | size {item.size} | bought {formatPHP(item.purchase_cost)}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <p className="text-xs text-gray-500">No exact available items found.</p>
+              )}
             </div>
-          )}
+            )}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-600">Manual Purchase Cost (PHP)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={manualPurchaseCost}
+                onChange={(e) => setManualPurchaseCost(e.target.value)}
+                className={INPUT}
+                placeholder={manualOnlyMatchMode ? 'Set buying price to continue' : 'Set only when no exact match'}
+                disabled={!!selectedInventoryId}
+              />
+            </div>
+            {matchError && <p className="text-sm text-red-500">{matchError}</p>}
+            <div className="flex justify-end gap-3 pt-2">
+              <button type="button" onClick={closeMatchModal}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">
+                Cancel
+              </button>
+              <button type="submit" disabled={matchingLoading}
+                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
+                {matchingLoading ? 'Saving...' : 'Apply'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
         </div>
 
         {!loading && totalPages > 1 && (
@@ -415,7 +627,7 @@ export default function Sales() {
                 className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
               <button type="submit" disabled={saving}
                 className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
-                {saving ? 'Saving…' : 'Save'}
+                {saving ? 'Saving...' : 'Save'}
               </button>
             </div>
           </form>
@@ -424,4 +636,5 @@ export default function Sales() {
     </div>
   )
 }
+
 
