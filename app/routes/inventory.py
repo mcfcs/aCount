@@ -148,6 +148,25 @@ def list_inventory():
         except ValueError:
             pass
 
+    size_type = request.args.get("size_type")
+    if size_type == "womens":
+        query = query.filter(
+            db.or_(
+                Inventory.shoe_name.ilike("%Wmns%"),
+                Inventory.shoe_name.ilike("%Women's%"),
+                Inventory.shoe_name.ilike("%Womens%"),
+            )
+        )
+    elif size_type == "kids":
+        query = query.filter(Inventory.shoe_name.ilike("%GS%"))
+    elif size_type == "mens":
+        query = query.filter(
+            ~Inventory.shoe_name.ilike("%Wmns%"),
+            ~Inventory.shoe_name.ilike("%Women's%"),
+            ~Inventory.shoe_name.ilike("%Womens%"),
+            ~Inventory.shoe_name.ilike("%GS%"),
+        )
+
     source = request.args.get("source")
     if source:
         query = query.filter(Inventory.source.ilike(f"%{source}%"))
@@ -401,6 +420,45 @@ def link_inventory_to_sale(inventory_id, sale_id):
         "inventory": item.to_dict(),
         "sale": sale.to_dict(),
     }), 200
+
+
+# ---- Purchase cost options endpoint --------------------------------------
+
+@inventory_bp.route("/purchase-costs", methods=["GET"])
+def get_purchase_costs():
+    """
+    GET /api/inventory/purchase-costs?sku=XXX
+    Returns all distinct non-zero purchase costs recorded for a SKU
+    across both Inventory and Sales tables, sorted ascending.
+    """
+    sku = request.args.get("sku", "").strip()
+    if not sku:
+        return jsonify({"error": "sku is required"}), 400
+
+    inv_costs = (
+        db.session.query(Inventory.purchase_cost)
+        .filter(
+            Inventory.sku == sku,
+            Inventory.purchase_cost.isnot(None),
+            Inventory.purchase_cost > 0,
+        )
+        .distinct()
+        .all()
+    )
+
+    sale_costs = (
+        db.session.query(Sale.purchase_cost)
+        .filter(
+            Sale.sku == sku,
+            Sale.purchase_cost.isnot(None),
+            Sale.purchase_cost > 0,
+        )
+        .distinct()
+        .all()
+    )
+
+    all_costs = sorted({float(r[0]) for r in inv_costs + sale_costs})
+    return jsonify({"sku": sku, "costs": all_costs}), 200
 
 
 # ---- Summary endpoint -----------------------------------------------------

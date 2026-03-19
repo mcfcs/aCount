@@ -5,7 +5,7 @@ import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
 import { exportToCsv } from '../utils/csv'
-import { getSales, getSalesSummary, getInventory, getPricingSuggestion, createSale, updateSale, deleteSale, linkInventoryToSale, unmatchSale } from '../services/api'
+import { getSales, getSalesSummary, getInventory, getPricingSuggestion, createSale, updateSale, deleteSale, linkInventoryToSale, unmatchSale, getPurchaseCosts } from '../services/api'
 import { usePhpEstimateRate, usdToPhp } from '../utils/exchangeRate'
 
 function formatUSD(value) {
@@ -95,6 +95,8 @@ export default function Sales() {
   const [statusFilter, setStatusFilter] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [orderSearch, setOrderSearch] = useState('')
+  const [skuSearch, setSkuSearch] = useState('')
+  const [matchableFilter, setMatchableFilter] = useState(false)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const phpRate = usePhpEstimateRate()
@@ -112,6 +114,7 @@ export default function Sales() {
   const [matchingLoading, setMatchingLoading] = useState(false)
   const [matchError, setMatchError] = useState(null)
   const [manualOnlyMatchMode, setManualOnlyMatchMode] = useState(false)
+  const [availablePurchaseCosts, setAvailablePurchaseCosts] = useState([])
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -123,6 +126,9 @@ export default function Sales() {
       if (q) params.shoe_name = q
       const oq = orderSearch.trim()
       if (oq) params.order_number = oq
+      const sq = skuSearch.trim()
+      if (sq) params.sku = sq
+      if (matchableFilter) params.matchable = '1'
       const [salesData, summaryData] = await Promise.all([getSales(params), getSalesSummary()])
       const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
       const total = salesData.total || items.length
@@ -134,13 +140,13 @@ export default function Sales() {
     } finally {
       setLoading(false)
     }
-  }, [page, statusFilter, searchQuery, orderSearch])
+  }, [page, statusFilter, searchQuery, orderSearch, skuSearch, matchableFilter])
 
   useEffect(() => { fetchData() }, [fetchData])
 
   useEffect(() => {
     setPage(1)
-  }, [searchQuery, orderSearch, statusFilter])
+  }, [searchQuery, orderSearch, statusFilter, skuSearch, matchableFilter])
 
   const fetchAllSalesForExport = useCallback(async () => {
     let pageNum = 1
@@ -256,24 +262,36 @@ export default function Sales() {
   const openMatchModal = async (sale) => {
     setMatchingSale(sale)
     setSelectedInventoryId('')
-    setManualPurchaseCost(
-      sale?.purchase_cost != null ? String(sale.purchase_cost) : ''
-    )
+    setManualPurchaseCost(sale?.purchase_cost != null ? String(sale.purchase_cost) : '')
     setMatchError(null)
     setMatchCandidates([])
+    setAvailablePurchaseCosts([])
     setMatchingLoading(true)
     setManualOnlyMatchMode(BUY_PRICE_ONLY_STATUSES.includes(sale.status))
     setMatchModalOpen(true)
-      if (BUY_PRICE_ONLY_STATUSES.includes(sale.status)) {
+
+    // Fetch distinct recorded purchase costs for this SKU
+    const costsData = sale?.sku
+      ? await getPurchaseCosts({ sku: sale.sku }).catch(() => ({ costs: [] }))
+      : { costs: [] }
+    const costs = costsData.costs || []
+    setAvailablePurchaseCosts(costs)
+
+    if (BUY_PRICE_ONLY_STATUSES.includes(sale.status)) {
       try {
-        const suggestion = await getPricingSuggestion({ sku: sale.sku })
-        const estimated = suggestion?.estimated_purchase_cost
-        if (estimated != null && sale?.purchase_cost == null) {
-          setManualPurchaseCost(String(estimated))
+        // Only auto-fill if there is exactly one distinct recorded cost
+        if (sale?.purchase_cost == null) {
+          if (costs.length === 1) {
+            setManualPurchaseCost(String(costs[0]))
+          } else if (costs.length === 0) {
+            const suggestion = await getPricingSuggestion({ sku: sale.sku })
+            const estimated = suggestion?.estimated_purchase_cost
+            if (estimated != null) setManualPurchaseCost(String(estimated))
+          }
+          // costs.length > 1 → leave blank, user picks from selector
         }
-      } catch (err) {
-        // Non-blocking: keep empty if no suggestion is found.
-        setMatchError(null)
+      } catch {
+        // Non-blocking
       } finally {
         setMatchingLoading(false)
       }
@@ -292,12 +310,16 @@ export default function Sales() {
       if (filtered.length === 0) {
         setMatchError('No exact available inventory match found.')
       }
+      // Auto-fill manual cost only when no inventory selection possible AND exactly one recorded cost
       if (sale?.purchase_cost == null) {
-        const suggestion = await getPricingSuggestion({ sku: sale.sku })
-        const estimated = suggestion?.estimated_purchase_cost
-        if (estimated != null) {
-          setManualPurchaseCost(current => current || String(estimated))
+        if (costs.length === 1) {
+          setManualPurchaseCost(String(costs[0]))
+        } else if (costs.length === 0) {
+          const suggestion = await getPricingSuggestion({ sku: sale.sku })
+          const estimated = suggestion?.estimated_purchase_cost
+          if (estimated != null) setManualPurchaseCost(current => current || String(estimated))
         }
+        // costs.length > 1 → leave blank, user picks from selector
       }
     } catch (err) {
       setMatchError(err?.response?.data?.error || 'Failed to load matching inventory.')
@@ -314,6 +336,7 @@ export default function Sales() {
     setSelectedInventoryId('')
     setManualPurchaseCost('')
     setManualOnlyMatchMode(false)
+    setAvailablePurchaseCosts([])
   }
 
   const handleMatchSubmit = async (e) => {
@@ -322,8 +345,9 @@ export default function Sales() {
     setMatchingLoading(true)
     setMatchError(null)
     try {
+      const costStr = manualPurchaseCost === '__manual__' ? '' : manualPurchaseCost
       if (manualOnlyMatchMode) {
-        const value = manualPurchaseCost !== '' ? Number(manualPurchaseCost) : NaN
+        const value = costStr !== '' ? Number(costStr) : NaN
         if (!Number.isFinite(value)) {
           setMatchError('Enter a valid buying price.')
           setMatchingLoading(false)
@@ -333,7 +357,7 @@ export default function Sales() {
       } else if (selectedInventoryId) {
         await linkInventoryToSale(Number(selectedInventoryId), matchingSale.sale_id)
       } else {
-        const value = manualPurchaseCost !== '' ? Number(manualPurchaseCost) : NaN
+        const value = costStr !== '' ? Number(costStr) : NaN
         if (!Number.isFinite(value)) {
           setMatchError('Enter a valid buying price when not selecting an inventory item.')
           setMatchingLoading(false)
@@ -372,9 +396,21 @@ export default function Sales() {
           <input type="text" placeholder="Search shoe name…" value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto" />
+          <input type="text" placeholder="SKU…" value={skuSearch}
+            onChange={e => setSkuSearch(e.target.value)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-36" />
           <input type="text" placeholder="Order #…" value={orderSearch}
             onChange={e => setOrderSearch(e.target.value)}
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-32" />
+          <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 shadow-sm cursor-pointer select-none whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={matchableFilter}
+              onChange={e => setMatchableFilter(e.target.checked)}
+              className="accent-indigo-600"
+            />
+            No cost, but matchable
+          </label>
           <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 sm:flex-1">
             Using USD→PHP rate from Settings: {phpRate}
           </div>
@@ -455,7 +491,7 @@ export default function Sales() {
                           : <span className="text-gray-400">Unmatched</span>}
                       </td>
                     <td className="px-4 py-3 text-center">
-                      {sale.inventory_match_status === 'Matched' ? (
+                      {sale.purchase_cost != null ? (
                         <button onClick={() => handleUnmatch(sale)}
                           className="text-xs text-amber-700 hover:text-amber-900 font-medium">
                           Unmatch
@@ -463,7 +499,7 @@ export default function Sales() {
                       ) : BUY_PRICE_ONLY_STATUSES.includes(sale.status) ? (
                         <button onClick={() => openMatchModal(sale)}
                           className="text-xs text-emerald-700 hover:text-emerald-900 font-medium">
-                          {sale.purchase_cost != null ? 'Edit Buying Price' : 'Add Buying Price'}
+                          Add Buying Price
                         </button>
                       ) : (
                         <button onClick={() => openMatchModal(sale)}
@@ -518,12 +554,34 @@ export default function Sales() {
               )}
             </div>
             )}
+            {availablePurchaseCosts.length > 1 && !selectedInventoryId && (
+              <div className="space-y-2">
+                <label className="block text-xs font-medium text-gray-600">
+                  Recorded Purchase Costs for this SKU
+                </label>
+                <select
+                  value={manualPurchaseCost}
+                  onChange={(e) => setManualPurchaseCost(e.target.value)}
+                  className={INPUT}
+                >
+                  <option value="">— Pick a recorded cost —</option>
+                  {availablePurchaseCosts.map(cost => (
+                    <option key={cost} value={cost}>{formatPHP(cost)}</option>
+                  ))}
+                  <option value="__manual__">Enter manually…</option>
+                </select>
+              </div>
+            )}
             <div className="space-y-2">
-              <label className="block text-xs font-medium text-gray-600">Manual Purchase Cost (PHP)</label>
+              <label className="block text-xs font-medium text-gray-600">
+                {availablePurchaseCosts.length > 1 && !selectedInventoryId
+                  ? 'Or enter a custom purchase cost (PHP)'
+                  : 'Manual Purchase Cost (PHP)'}
+              </label>
               <input
                 type="number"
                 step="0.01"
-                value={manualPurchaseCost}
+                value={manualPurchaseCost === '__manual__' ? '' : manualPurchaseCost}
                 onChange={(e) => setManualPurchaseCost(e.target.value)}
                 className={INPUT}
                 placeholder={manualOnlyMatchMode ? 'Set buying price to continue' : 'Set only when no exact match'}

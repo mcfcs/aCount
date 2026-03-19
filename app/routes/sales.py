@@ -286,6 +286,24 @@ def list_sales():
     if inventory_match:
         query = query.filter(Sale.inventory_match_status == inventory_match)
 
+    matchable = request.args.get("matchable")
+    if matchable == "1":
+        inv_skus = db.session.query(Inventory.sku).filter(
+            Inventory.purchase_cost.isnot(None),
+            Inventory.purchase_cost > 0,
+        )
+        sale_skus = db.session.query(Sale.sku).filter(
+            Sale.purchase_cost.isnot(None),
+            Sale.purchase_cost > 0,
+        )
+        query = query.filter(
+            Sale.purchase_cost.is_(None),
+            db.or_(
+                Sale.sku.in_(inv_skus),
+                Sale.sku.in_(sale_skus),
+            ),
+        )
+
     platform = request.args.get("platform")
     if platform:
         query = query.filter(Sale.platform.ilike(f"%{platform}%"))

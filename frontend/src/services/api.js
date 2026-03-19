@@ -26,6 +26,7 @@ export const createInventoryItems = (data) => client.post('/inventory/bulk', dat
 export const updateInventoryItem = (id, data) => client.patch(`/inventory/${id}`, data).then(r => r.data)
 export const deleteInventoryItem = (id) => client.delete(`/inventory/${id}`).then(r => r.data)
 export const linkInventoryToSale = (inventoryId, saleId) => client.post(`/inventory/${inventoryId}/link-sale/${saleId}`).then(r => r.data)
+export const getPurchaseCosts = (params = {}) => client.get('/inventory/purchase-costs', { params }).then(r => r.data)
 export const getShoeBySku = (sku) => client.get(`/shoes/by-sku/${encodeURIComponent(sku)}`).then(r => r.data)
 export const ensureShoe = (data) => client.post('/shoes/ensure', data).then(r => r.data)
 

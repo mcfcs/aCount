@@ -16,6 +16,7 @@ import {
   getPricingSuggestion,
   getShoes,
   ensureShoe,
+  getPurchaseCosts,
 } from '../services/api'
 
 function formatPHP(value) {
@@ -156,6 +157,8 @@ export default function Inventory() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
+  const [sizeFilter, setSizeFilter] = useState('')
+  const [sizeTypeFilter, setSizeTypeFilter] = useState('')
   const [activeView, setActiveView] = useState('inventory')
   const [shoeBrandFilter, setShoeBrandFilter] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
@@ -167,6 +170,7 @@ export default function Inventory() {
   const [saveError, setSaveError] = useState(null)
   const [bulkMode, setBulkMode] = useState(false)
   const [bulkItems, setBulkItems] = useState([EMPTY_BULK_ITEM])
+  const [availablePurchaseCosts, setAvailablePurchaseCosts] = useState([])
 
   const [shoeModalOpen, setShoeModalOpen] = useState(false)
   const [shoeForm, setShoeForm] = useState(EMPTY_SHOE_ITEM)
@@ -227,6 +231,8 @@ export default function Inventory() {
     try {
       const params = {}
       if (statusFilter) params.status = statusFilter
+      if (sizeFilter !== '') params.size = sizeFilter
+      if (sizeTypeFilter) params.size_type = sizeTypeFilter
       const q = searchQuery.trim()
       if (q) params.q = q
       const rows = await fetchAllPages((requestParams) => getInventory(requestParams), params)
@@ -236,7 +242,7 @@ export default function Inventory() {
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, activeView, shoeBrandFilter, searchQuery])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, searchQuery])
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -284,6 +290,7 @@ export default function Inventory() {
     setForm({ ...EMPTY_ITEM, date_purchased: toDatetimeLocal(new Date().toISOString()) })
     setBulkMode(true)
     setBulkItems([{ ...EMPTY_BULK_ITEM }])
+    setAvailablePurchaseCosts([])
     setSaveError(null)
     setModalOpen(true)
   }
@@ -304,6 +311,7 @@ export default function Inventory() {
     })
     setBulkMode(false)
     setBulkItems([{ ...EMPTY_BULK_ITEM }])
+    setAvailablePurchaseCosts([])
     setSaveError(null)
     setModalOpen(true)
   }
@@ -328,15 +336,23 @@ export default function Inventory() {
   const autofillPurchaseCostFromSku = async (sku) => {
     if (editing) return
     if (!sku) return
-    if (form.purchase_cost !== '') return
     try {
-      const suggestion = await getPricingSuggestion({ sku })
-      const estimated = suggestion?.estimated_purchase_cost
-      if (estimated != null) {
-        setForm(prev => ({ ...prev, purchase_cost: String(estimated) }))
+      const costsData = await getPurchaseCosts({ sku }).catch(() => ({ costs: [] }))
+      const costs = costsData.costs || []
+      setAvailablePurchaseCosts(costs)
+      if (form.purchase_cost !== '') return  // don't overwrite what the user typed
+      if (costs.length === 1) {
+        setForm(prev => ({ ...prev, purchase_cost: String(costs[0]) }))
+      } else if (costs.length === 0) {
+        const suggestion = await getPricingSuggestion({ sku })
+        const estimated = suggestion?.estimated_purchase_cost
+        if (estimated != null) {
+          setForm(prev => ({ ...prev, purchase_cost: String(estimated) }))
+        }
       }
+      // costs.length > 1 → leave blank, user picks from selector
     } catch {
-      // Non-blocking: keep manual value if no historical cost exists
+      // Non-blocking
     }
   }
 
@@ -525,6 +541,22 @@ export default function Inventory() {
                 <option value="">All Statuses</option>
                 {ALL_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
+              <select value={sizeTypeFilter} onChange={e => setSizeTypeFilter(e.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto">
+                <option value="">All Types</option>
+                <option value="mens">Standard / Mens</option>
+                <option value="womens">Women's</option>
+                <option value="kids">Kids (GS)</option>
+              </select>
+              <input
+                type="number"
+                step="0.5"
+                min="1"
+                placeholder="Size…"
+                value={sizeFilter}
+                onChange={e => setSizeFilter(e.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-24"
+              />
               <button onClick={handleExport}
                 className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
                 Export CSV
@@ -713,7 +745,7 @@ export default function Inventory() {
                   </button>
                 </div>
                 {bulkItems.map((row, idx) => (
-                  <div key={`${idx}-${row.size}-${row.quantity}`} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div key={idx} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                     <Field label={`Size #${idx + 1}`}>
                       <input
                         type="number"
@@ -749,8 +781,22 @@ export default function Inventory() {
               </div>
             )}
 
+            {!editing && availablePurchaseCosts.length > 1 && (
+              <Field label="Recorded Purchase Costs for this SKU">
+                <select
+                  value={form.purchase_cost}
+                  onChange={setField('purchase_cost')}
+                  className={INPUT}
+                >
+                  <option value="">— Pick a recorded cost —</option>
+                  {availablePurchaseCosts.map(cost => (
+                    <option key={cost} value={cost}>{formatPHP(cost)}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="Purchase Cost (PHP)">
+              <Field label={!editing && availablePurchaseCosts.length > 1 ? 'Or enter a custom cost (PHP)' : 'Purchase Cost (PHP)'}>
                 <input type="number" step="0.01" required value={form.purchase_cost} onChange={setField('purchase_cost')} className={INPUT} />
               </Field>
               <Field label="Listed Price (USD)">
