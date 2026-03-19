@@ -79,8 +79,15 @@ class Inventory(db.Model):
     created_at      = db.Column(db.DateTime, nullable=False, default=now)
     updated_at      = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
 
-    # Relationship
+    # Relationships
     linked_sale = db.relationship("Sale", backref="inventory_items", foreign_keys=[linked_sale_id])
+    shoe = db.relationship(
+        "Shoe",
+        primaryjoin="foreign(Inventory.sku) == Shoe.sku",
+        uselist=False,
+        lazy="joined",
+        viewonly=True,
+    )
 
     VALID_STATUSES = ("Available", "Sold", "Consigned")
 
@@ -89,6 +96,7 @@ class Inventory(db.Model):
             "inventory_id": self.inventory_id,
             "sku": self.sku,
             "shoe_name": self.shoe_name,
+            "brand": self.shoe.brand if self.shoe else None,
             "size": self.size,
             "date_purchased": self.date_purchased.isoformat() if self.date_purchased else None,
             "purchase_cost": float(self.purchase_cost) if self.purchase_cost else None,

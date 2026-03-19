@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+﻿import { useState, useEffect, useCallback } from 'react'
 import TopBar from '../components/layout/TopBar'
 import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
@@ -20,7 +20,7 @@ import {
 
 function formatPHP(value) {
   const num = parseFloat(value) || 0
-  return `₱${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(num)
 }
 function formatUSD(value) {
   if (value == null) return '—'
@@ -62,6 +62,7 @@ const BRAND_COLORS = {
   Reebok: '#06b6d4',
 }
 const SHOE_CHART_FALLBACK = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#14b8a6', '#8b5cf6', '#f97316', '#06b6d4', '#64748b', '#3b82f6']
+const INVENTORY_TAG_OPTIONS = ['Returned', 'Molds', 'Dirty', 'Used', 'No Box', 'Damaged Box', 'Mismatched Sizes']
 
 const INPUT = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'
 const Field = ({ label, children }) => (
@@ -71,11 +72,64 @@ const Field = ({ label, children }) => (
   </div>
 )
 
+function parseInventoryTags(notes) {
+  try {
+    if (!notes) return []
+    const parsed = JSON.parse(notes)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag)
+  } catch {
+    return []
+  }
+}
+
+function tagsFromFormValue(value) {
+  return Array.isArray(value) ? value.filter((tag) => String(tag).trim()) : []
+}
+
+function inferBrandFromSku(rawSku) {
+  const trimmed = String(rawSku || '').trim()
+  if (!trimmed) return ''
+
+  const normalized = trimmed.replace(/\s+/g, ' ').trim()
+  const parts = normalized.split(' ').filter(Boolean)
+
+  if (parts.length >= 2) {
+    const [first, second] = parts
+    if (first.length === 6 && second.length === 2) return 'Puma'
+    if (first.length === 6 && second.length === 3) return 'Nike'
+    if (first.length === 7) return 'Hoka'
+    if (first.length === 8) return 'Asics'
+  }
+
+  const compact = normalized.replace(/\s+/g, '')
+  if (compact.length === 7 && /c$/i.test(compact)) return 'Converse'
+  if (compact.length === 6) return 'Adidas'
+
+  const nbMatch = compact.match(/^([A-Za-z]+)(\d+)([A-Za-z]+)$/)
+  if (nbMatch && !/c$/i.test(compact)) return 'New Balance'
+
+  return ''
+}
+
+function canExpandShoeName(currentName, suggestedName) {
+  const current = String(currentName || '').trim()
+  const suggested = String(suggestedName || '').trim()
+  if (!current || !suggested) return false
+  if (current === suggested) return false
+  return (
+    suggested.toLowerCase().startsWith(current.toLowerCase()) &&
+    suggested.length > current.length
+  )
+}
+
 const EMPTY_ITEM = {
   sku: '', shoe_name: '', size: '', status: 'Available',
   brand: '',
   purchase_cost: '', listed_price: '', date_purchased: '',
-  source: '', notes: '',
+  source: '', tags: [],
 }
 const EMPTY_BULK_ITEM = { size: '', quantity: 1 }
 const EMPTY_SHOE_ITEM = {
@@ -223,6 +277,7 @@ export default function Inventory() {
   }, [statusFilter, searchQuery])
 
   const totalValue = items.reduce((sum, i) => sum + parseFloat(i.purchase_cost || 0), 0)
+  const hasInventoryTags = items.some((item) => parseInventoryTags(item.notes).length > 0)
 
   const openAdd = () => {
     setEditing(null)
@@ -245,7 +300,7 @@ export default function Inventory() {
       listed_price: item.listed_price ?? '',
       date_purchased: toDatetimeLocal(item.date_purchased),
       source: item.source ?? '',
-      notes: item.notes ?? '',
+      tags: parseInventoryTags(item.notes),
     })
     setBulkMode(false)
     setBulkItems([{ ...EMPTY_BULK_ITEM }])
@@ -260,6 +315,10 @@ export default function Inventory() {
   }
 
   const setField = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }))
+  const setTag = (tag) => setForm(f => ({
+    ...f,
+    tags: f.tags.includes(tag) ? f.tags.filter((item) => item !== tag) : [...f.tags, tag],
+  }))
   const setBulkField = (idx, field) => (e) => {
     setBulkItems(items => items.map((item, i) => (i === idx ? { ...item, [field]: e.target.value } : item)))
   }
@@ -292,6 +351,7 @@ export default function Inventory() {
           size: form.size !== '' ? Number(form.size) : undefined,
           purchase_cost: form.purchase_cost !== '' ? Number(form.purchase_cost) : undefined,
           listed_price: form.listed_price !== '' ? Number(form.listed_price) : undefined,
+          notes: tagsFromFormValue(form.tags).length ? JSON.stringify(tagsFromFormValue(form.tags)) : '',
         }
         await updateInventoryItem(editing.inventory_id, payload)
         setModalOpen(false)
@@ -306,7 +366,7 @@ export default function Inventory() {
           listed_price: form.listed_price !== '' ? Number(form.listed_price) : undefined,
           date_purchased: form.date_purchased,
           source: form.source.trim(),
-          notes: form.notes.trim(),
+          notes: tagsFromFormValue(form.tags).length ? JSON.stringify(tagsFromFormValue(form.tags)) : '',
         }
         const items = []
         for (const row of bulkItems) {
@@ -338,6 +398,7 @@ export default function Inventory() {
           size: form.size !== '' ? Number(form.size) : undefined,
           purchase_cost: form.purchase_cost !== '' ? Number(form.purchase_cost) : undefined,
           listed_price: form.listed_price !== '' ? Number(form.listed_price) : undefined,
+          notes: tagsFromFormValue(form.tags).length ? JSON.stringify(tagsFromFormValue(form.tags)) : '',
         }
         await createInventoryItem(payload)
         setModalOpen(false)
@@ -492,7 +553,12 @@ export default function Inventory() {
               <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    {['SKU','Shoe Name','Size','Status','Purchase Cost','Listed Price','Date Purchased','Source','Linked Sale',''].map(col => (
+                    {[
+                      'SKU', 'Shoe Name', 'Brand', 'Size', 'Status', 'Purchase Cost', 'Listed Price', 'Date Purchased',
+                      'Source', 'Linked Sale',
+                      ...(hasInventoryTags ? ['Tags'] : []),
+                      ''
+                    ].map(col => (
                       <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
                     ))}
                   </tr>
@@ -511,6 +577,7 @@ export default function Inventory() {
                             </span>
                           )}
                         </td>
+                        <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{item.brand || '—'}</td>
                         <td className="px-4 py-3 text-gray-500">{item.size || '—'}</td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_STYLES[item.status] || 'bg-gray-100 text-gray-600'}`}>
@@ -522,6 +589,17 @@ export default function Inventory() {
                         <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(item.date_purchased)}</td>
                         <td className="px-4 py-3 text-gray-500">{item.source || '—'}</td>
                         <td className="px-4 py-3 text-gray-500 font-mono text-xs">{item.linked_sale_id || '—'}</td>
+                        {hasInventoryTags && (
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-2">
+                              {(parseInventoryTags(item.notes) || []).map((tag) => (
+                                <span key={`${item.inventory_id}-${tag}`} className="inline-flex rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-700">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        )}
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
                             <button onClick={() => openEdit(item)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
@@ -569,7 +647,10 @@ export default function Inventory() {
             </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Brand">
-                <input type="text" value={form.brand} onChange={setField('brand')} className={INPUT} />
+                <select value={form.brand} onChange={setField('brand')} className={INPUT}>
+                  <option value="">Auto-detect / Other</option>
+                  {ALL_BRANDS.map(brand => <option key={brand} value={brand}>{brand}</option>)}
+                </select>
               </Field>
               <Field label="SKU">
                 <input
@@ -577,18 +658,23 @@ export default function Inventory() {
                   required
                   value={form.sku}
                   onChange={setField('sku')}
-                   onBlur={async () => {
-                     const sku = String(form.sku || '').trim()
+                  onBlur={async () => {
+                    const sku = String(form.sku || '').trim()
                      if (!sku) return
                      try {
                        const shoe = await getShoeBySku(sku)
+                      const inferredBrand = inferBrandFromSku(sku)
                       setForm((prev) => ({
                         ...prev,
-                        shoe_name: prev.shoe_name || shoe.name || prev.shoe_name,
-                        brand: prev.brand || shoe.brand || prev.brand || '',
+                        shoe_name: canExpandShoeName(prev.shoe_name, shoe.name)
+                          ? shoe.name
+                          : prev.shoe_name || shoe.name || prev.shoe_name,
+                        brand: prev.brand || shoe.brand || prev.brand || inferredBrand || '',
                       }))
                      } catch {
                        // no-op: allow adding new model without existing shoe row
+                      const inferredBrand = inferBrandFromSku(sku)
+                      setForm((prev) => (prev.brand ? prev : { ...prev, brand: inferredBrand }))
                      }
                      await autofillPurchaseCostFromSku(sku)
                     }}
@@ -684,8 +770,26 @@ export default function Inventory() {
             <Field label="Source">
               <input type="text" value={form.source} onChange={setField('source')} placeholder="e.g. Shopee, Nike PH" className={INPUT} />
             </Field>
-            <Field label="Notes">
-              <textarea rows={2} value={form.notes} onChange={setField('notes')} className={INPUT} />
+            <Field label="Tags">
+              <div className="flex flex-wrap gap-2">
+                {INVENTORY_TAG_OPTIONS.map((tag) => {
+                  const active = form.tags.includes(tag)
+                  return (
+                    <button
+                      type="button"
+                      key={tag}
+                      onClick={() => setTag(tag)}
+                      className={`rounded-full border px-3 py-1 text-xs ${
+                        active
+                          ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                          : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  )
+                })}
+              </div>
             </Field>
             {saveError && <p className="text-sm text-red-500">{saveError}</p>}
             <div className="flex justify-end gap-3 pt-2">
@@ -744,4 +848,5 @@ export default function Inventory() {
     </div>
   )
 }
+
 
