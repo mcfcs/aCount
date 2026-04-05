@@ -9,6 +9,7 @@ to obtain the initial refresh token, then store it in .env.
 import os
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 
 SCOPES = [
@@ -42,7 +43,13 @@ def get_gmail_service():
     )
 
     # Refresh to get a valid access token
-    creds.refresh(Request())
+    try:
+        creds.refresh(Request())
+    except RefreshError as e:
+        raise RuntimeError(
+            "Gmail refresh token is invalid or expired. "
+            "Re-run setup_oauth.py and update GMAIL_REFRESH_TOKEN in .env"
+        ) from e
 
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 

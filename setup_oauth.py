@@ -45,7 +45,11 @@ client_config = {
 }
 
 flow = InstalledAppFlow.from_client_config(client_config, scopes=SCOPES)
-creds = flow.run_local_server(port=0)
+creds = flow.run_local_server(
+    port=0,
+    access_type="offline",
+    prompt="consent",
+)
 
 print("\n" + "=" * 60)
 print("OAuth setup complete!")
