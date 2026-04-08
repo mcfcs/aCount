@@ -68,7 +68,7 @@ const BRAND_COLORS = {
   Reebok: '#06b6d4',
 }
 const SHOE_CHART_FALLBACK = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#14b8a6', '#8b5cf6', '#f97316', '#06b6d4', '#64748b', '#3b82f6']
-const INVENTORY_TAG_OPTIONS = ['Returned', 'Molds', 'Dirty', 'Used', 'No Box', 'Damaged Box', 'Mismatched Sizes']
+const INVENTORY_TAG_OPTIONS = ['Returned', 'Molds', 'Dirty', 'Used', 'No Box', 'Damaged Box', 'Mismatched Sizes', 'Yellowing', 'Discoloration']
 
 const INPUT = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'
 const Field = ({ label, children }) => (
