@@ -9,6 +9,8 @@ and returns a dict of extracted fields. Missing fields are omitted (not None).
 import re
 import base64
 import logging
+import urllib.request
+from urllib.parse import urlparse
 from datetime import datetime
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
@@ -46,6 +48,226 @@ def get_message_parts(gmail_message: dict) -> tuple[str, str, str, datetime | No
         body = gmail_message.get("snippet", "")
 
     return subject, sender, body, sent_at
+
+
+def extract_largest_image_part(service, gmail_message: dict) -> dict | None:
+    """
+    Return the best shoe image candidate from a Gmail API message resource.
+    Supports:
+      - image/* MIME parts and attachments
+      - cid: inline images referenced by HTML
+      - remote/data URL images referenced by HTML
+    Result shape: {filename, content_type, data, size}
+    """
+    payload = gmail_message.get("payload", {}) or {}
+    candidates = []
+    cid_images = {}
+    html_bodies = []
+
+    def walk(part: dict):
+        mime_type = str(part.get("mimeType") or "").lower()
+        filename = part.get("filename") or ""
+        body = part.get("body", {}) or {}
+        attachment_id = body.get("attachmentId")
+        encoded_data = body.get("data")
+        part_size = int(body.get("size") or 0)
+        headers = part.get("headers", []) or []
+
+        if mime_type.startswith("image/"):
+            raw_bytes = None
+            if encoded_data:
+                try:
+                    raw_bytes = _decode_gmail_base64(encoded_data)
+                except Exception:
+                    raw_bytes = None
+            elif attachment_id:
+                try:
+                    attachment = service.users().messages().attachments().get(
+                        userId="me",
+                        messageId=gmail_message["id"],
+                        id=attachment_id,
+                    ).execute()
+                    attachment_data = attachment.get("data", "")
+                    if attachment_data:
+                        raw_bytes = _decode_gmail_base64(attachment_data)
+                        part_size = max(part_size, int(attachment.get("size") or 0), len(raw_bytes))
+                except Exception as exc:
+                    logger.warning(f"Could not download Gmail attachment for message {gmail_message.get('id')}: {exc}")
+
+            if raw_bytes:
+                candidate = {
+                    "filename": filename,
+                    "content_type": mime_type,
+                    "data": raw_bytes,
+                    "size": max(part_size, len(raw_bytes)),
+                }
+                candidates.append(candidate)
+                content_id = next((h.get("value") for h in headers if str(h.get("name", "")).lower() == "content-id"), "")
+                if content_id:
+                    cid_images[content_id.strip().strip("<>").lower()] = candidate
+
+        if mime_type == "text/html":
+            if encoded_data:
+                try:
+                    html_bodies.append(_decode_gmail_base64(encoded_data).decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    walk(payload)
+    for html in html_bodies:
+        for image_info in _extract_html_images(html):
+            candidate = _candidate_from_html_image_src(image_info.get("src", ""), cid_images)
+            if candidate:
+                candidate["priority"] = _html_image_priority(image_info, candidate)
+                candidates.append(candidate)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item.get("priority", 0), item.get("size", 0)))
+
+
+def _decode_gmail_base64(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "===")
+
+
+class _HTMLImageCollector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.images = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "img":
+            return
+        attrs_dict = dict(attrs)
+        src = attrs_dict.get("src")
+        if src:
+            self.images.append({
+                "src": src.strip(),
+                "alt": str(attrs_dict.get("alt") or "").strip(),
+                "class": str(attrs_dict.get("class") or "").strip(),
+                "width": str(attrs_dict.get("width") or "").strip(),
+                "height": str(attrs_dict.get("height") or "").strip(),
+            })
+
+
+def _extract_html_images(html: str) -> list[dict]:
+    parser = _HTMLImageCollector()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    return parser.images
+
+
+def _extract_google_proxy_original_url(src: str) -> str | None:
+    if "#" not in src:
+        return None
+    fragment = src.split("#", 1)[1].strip()
+    if fragment.startswith("http://") or fragment.startswith("https://"):
+        return fragment
+    return None
+
+
+def _html_image_priority(image_info: dict, candidate: dict) -> int:
+    score = 0
+    src = str(image_info.get("src") or "").lower()
+    alt = str(image_info.get("alt") or "").lower()
+    class_name = str(image_info.get("class") or "").lower()
+    filename = str(candidate.get("filename") or "").lower()
+    content_type = str(candidate.get("content_type") or "").lower()
+
+    if "product image" in alt:
+        score += 1000
+    elif "product" in alt or "shoe" in alt or "sneaker" in alt:
+        score += 500
+
+    if "product_template_pictures" in src or "image.goat.com" in src:
+        score += 900
+    if "product" in src:
+        score += 250
+    if "logo" in src or "icon" in src or "banner" in src:
+        score -= 400
+
+    if "ctowud" in class_name or "a6t" in class_name:
+        score += 25
+
+    if "png" in filename or content_type == "image/png":
+        score += 25
+
+    try:
+        width = int(float(image_info.get("width") or 0))
+    except ValueError:
+        width = 0
+    try:
+        height = int(float(image_info.get("height") or 0))
+    except ValueError:
+        height = 0
+
+    if width >= 120 or height >= 120:
+        score += 150
+    elif width and width < 64:
+        score -= 150
+
+    score += min(int(candidate.get("size") or 0) // 1024, 250)
+    return score
+
+
+def _candidate_from_html_image_src(src: str, cid_images: dict[str, dict]) -> dict | None:
+    lowered = src.lower()
+    if lowered.startswith("cid:"):
+        return cid_images.get(src[4:].strip().strip("<>").lower())
+
+    if lowered.startswith("data:image/"):
+        try:
+            header, encoded = src.split(",", 1)
+            mime_match = re.match(r"data:(image/[^;]+);base64$", header, re.IGNORECASE)
+            if not mime_match:
+                return None
+            raw = base64.b64decode(encoded)
+            return {
+                "filename": "",
+                "content_type": mime_match.group(1).lower(),
+                "data": raw,
+                "size": len(raw),
+            }
+        except Exception:
+            return None
+
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        candidate_urls = []
+        original_url = _extract_google_proxy_original_url(src)
+        if original_url:
+            candidate_urls.append(original_url)
+        candidate_urls.append(src)
+
+        parsed = urlparse(src)
+        if "googleusercontent.com" in parsed.netloc and original_url:
+            candidate_urls = [original_url, src]
+
+        for candidate_url in candidate_urls:
+            try:
+                request = urllib.request.Request(candidate_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                    if not content_type.startswith("image/"):
+                        continue
+                    raw = response.read()
+                    if not raw:
+                        continue
+                    return {
+                        "filename": candidate_url.rsplit("/", 1)[-1],
+                        "content_type": content_type,
+                        "data": raw,
+                        "size": len(raw),
+                    }
+            except Exception as exc:
+                logger.warning(f"Could not download remote HTML image {candidate_url}: {exc}")
+        return None
+
+    return None
 
 
 def _extract_body(payload: dict) -> str:
@@ -252,6 +474,18 @@ def parse_confirmation(subject: str, body: str) -> dict:
     earnings_match = re.search(r'Your Earnings:\s*\$?([\d,]+(?:\.\d+)?)', body, re.IGNORECASE)
     if earnings_match:
         result["amount_made"] = float(earnings_match.group(1).replace(",", ""))
+
+    name_match = re.search(r'Name:\s*(.+)', body, re.IGNORECASE)
+    if name_match:
+        result["shoe_name"] = name_match.group(1).strip()
+
+    sku_match = re.search(r'SKU:\s*(.+)', body, re.IGNORECASE)
+    if sku_match:
+        result["sku"] = sku_match.group(1).strip()
+
+    size_match = re.search(r'Size:\s*([\d.]+)', body, re.IGNORECASE)
+    if size_match:
+        result["size"] = float(size_match.group(1))
 
     return result
 

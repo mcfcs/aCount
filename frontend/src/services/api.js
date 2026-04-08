@@ -11,7 +11,7 @@ export const getDashboardAlerts = () => client.get('/dashboard/alerts').then(r =
 
 // Sales
 export const getSales = (params = {}) => client.get('/sales', { params }).then(r => r.data)
-export const getSalesSummary = () => client.get('/sales/summary').then(r => r.data)
+export const getSalesSummary = (params = {}) => client.get('/sales/summary', { params }).then(r => r.data)
 export const getPricingSuggestion = (params = {}) => client.get('/sales/pricing-suggestion', { params }).then(r => r.data)
 export const createSale = (data) => client.post('/sales', data).then(r => r.data)
 export const updateSale = (id, data) => client.patch(`/sales/${id}`, data).then(r => r.data)
@@ -21,6 +21,7 @@ export const unmatchSale = (id) => client.post(`/sales/${id}/unmatch`).then(r =>
 // Inventory
 export const getShoes = (params = {}) => client.get('/shoes', { params }).then(r => r.data)
 export const getInventory = (params = {}) => client.get('/inventory', { params }).then(r => r.data)
+export const getInventorySummary = (params = {}) => client.get('/inventory/summary', { params }).then(r => r.data)
 export const createInventoryItem = (data) => client.post('/inventory', data).then(r => r.data)
 export const createInventoryItems = (data) => client.post('/inventory/bulk', data).then(r => r.data)
 export const updateInventoryItem = (id, data) => client.patch(`/inventory/${id}`, data).then(r => r.data)
@@ -29,6 +30,9 @@ export const linkInventoryToSale = (inventoryId, saleId) => client.post(`/invent
 export const getPurchaseCosts = (params = {}) => client.get('/inventory/purchase-costs', { params }).then(r => r.data)
 export const getShoeBySku = (sku) => client.get(`/shoes/by-sku/${encodeURIComponent(sku)}`).then(r => r.data)
 export const ensureShoe = (data) => client.post('/shoes/ensure', data).then(r => r.data)
+export const ensureShoeWithImage = (formData) => client.post('/shoes/ensure', formData, {
+  headers: { 'Content-Type': 'multipart/form-data' },
+}).then(r => r.data)
 
 // Bank Transfers
 export const getBankTransfers = (params = {}) => client.get('/bank-transfers', { params }).then(r => r.data)

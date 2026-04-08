@@ -4,8 +4,9 @@ import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
+import ImageDropInput from '../components/common/ImageDropInput'
 import { exportToCsv } from '../utils/csv'
-import { getSales, getSalesSummary, getInventory, getPricingSuggestion, createSale, updateSale, deleteSale, linkInventoryToSale, unmatchSale, getPurchaseCosts } from '../services/api'
+import { getSales, getSalesSummary, getInventory, getPricingSuggestion, createSale, updateSale, deleteSale, linkInventoryToSale, unmatchSale, getPurchaseCosts, getShoeBySku, ensureShoe, ensureShoeWithImage } from '../services/api'
 import { usePhpEstimateRate, usdToPhp } from '../utils/exchangeRate'
 
 function formatUSD(value) {
@@ -22,6 +23,18 @@ function calculateProfitPhp(amountMade, purchaseCost, phpRate) {
   const amountMadePhp = usdToPhp(amountMade, phpRate)
   if (amountMadePhp == null || purchaseCost == null) return null
   return parseFloat(amountMadePhp) - parseFloat(purchaseCost)
+}
+
+function buildMonthRangeStart(monthValue) {
+  return monthValue ? `${monthValue}-01T00:00:00` : ''
+}
+
+function buildMonthRangeEnd(monthValue) {
+  if (!monthValue) return ''
+  const [year, month] = monthValue.split('-').map(Number)
+  if (!year || !month) return ''
+  const lastDay = new Date(year, month, 0).getDate()
+  return `${monthValue}-${String(lastDay).padStart(2, '0')}T23:59:59`
 }
 
 function formatDate(dateStr) {
@@ -96,6 +109,7 @@ export default function Sales() {
   const [searchQuery, setSearchQuery] = useState('')
   const [orderSearch, setOrderSearch] = useState('')
   const [skuSearch, setSkuSearch] = useState('')
+  const [saleMonth, setSaleMonth] = useState('')
   const [matchableFilter, setMatchableFilter] = useState(false)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
@@ -104,6 +118,10 @@ export default function Sales() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(EMPTY_SALE)
+  const [shoeImageInfo, setShoeImageInfo] = useState(null)
+  const [shoeImageFile, setShoeImageFile] = useState(null)
+  const [shoeImageUrl, setShoeImageUrl] = useState('')
+  const [shoeImagePreview, setShoeImagePreview] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
   const [matchModalOpen, setMatchModalOpen] = useState(false)
@@ -115,6 +133,16 @@ export default function Sales() {
   const [matchError, setMatchError] = useState(null)
   const [manualOnlyMatchMode, setManualOnlyMatchMode] = useState(false)
   const [availablePurchaseCosts, setAvailablePurchaseCosts] = useState([])
+  const completedProfitPhp = summary?.profit_earnings_usd != null && summary?.profit_purchase_cost_php != null
+    ? (usdToPhp(summary.profit_earnings_usd, phpRate) - Number(summary.profit_purchase_cost_php || 0))
+    : null
+
+  useEffect(() => {
+    if (!shoeImageFile) return undefined
+    const previewUrl = URL.createObjectURL(shoeImageFile)
+    setShoeImagePreview(previewUrl)
+    return () => URL.revokeObjectURL(previewUrl)
+  }, [shoeImageFile])
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -128,8 +156,12 @@ export default function Sales() {
       if (oq) params.order_number = oq
       const sq = skuSearch.trim()
       if (sq) params.sku = sq
+      if (saleMonth) {
+        params.date_from = buildMonthRangeStart(saleMonth)
+        params.date_to = buildMonthRangeEnd(saleMonth)
+      }
       if (matchableFilter) params.matchable = '1'
-      const [salesData, summaryData] = await Promise.all([getSales(params), getSalesSummary()])
+      const [salesData, summaryData] = await Promise.all([getSales(params), getSalesSummary(params)])
       const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
       const total = salesData.total || items.length
       setSales(items)
@@ -140,13 +172,13 @@ export default function Sales() {
     } finally {
       setLoading(false)
     }
-  }, [page, statusFilter, searchQuery, orderSearch, skuSearch, matchableFilter])
+  }, [page, statusFilter, searchQuery, orderSearch, skuSearch, saleMonth, matchableFilter])
 
   useEffect(() => { fetchData() }, [fetchData])
 
   useEffect(() => {
     setPage(1)
-  }, [searchQuery, orderSearch, statusFilter, skuSearch, matchableFilter])
+  }, [searchQuery, orderSearch, statusFilter, skuSearch, saleMonth, matchableFilter])
 
   const fetchAllSalesForExport = useCallback(async () => {
     let pageNum = 1
@@ -159,6 +191,12 @@ export default function Sales() {
       if (q) params.shoe_name = q
       const oq = orderSearch.trim()
       if (oq) params.order_number = oq
+      const sq = skuSearch.trim()
+      if (sq) params.sku = sq
+      if (saleMonth) {
+        params.date_from = buildMonthRangeStart(saleMonth)
+        params.date_to = buildMonthRangeEnd(saleMonth)
+      }
       const salesData = await getSales(params)
       const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
       const totalPages = salesData.pages || Math.ceil((salesData.total || 0) / perPage)
@@ -173,16 +211,62 @@ export default function Sales() {
       pageNum += 1
     }
     return allItems
-  }, [statusFilter, searchQuery, orderSearch])
+  }, [statusFilter, searchQuery, orderSearch, skuSearch, saleMonth])
 
   const openAdd = () => {
     setEditing(null)
     setForm({ ...EMPTY_SALE, sale_date: toDatetimeLocal(new Date().toISOString()) })
+    setShoeImageInfo(null)
+    setShoeImageFile(null)
+    setShoeImageUrl('')
+    setShoeImagePreview('')
     setSaveError(null)
     setModalOpen(true)
   }
 
-  const openEdit = (sale) => {
+  const closeSaleModal = () => {
+    setModalOpen(false)
+    setEditing(null)
+    setShoeImageInfo(null)
+    setShoeImageFile(null)
+    setShoeImageUrl('')
+    setShoeImagePreview('')
+    setSaveError(null)
+  }
+
+  const checkShoeImageStatus = async ({ sku, shoeName }) => {
+    const trimmedSku = String(sku || '').trim()
+    const trimmedName = String(shoeName || '').trim()
+
+    if (!trimmedSku) {
+      setShoeImageInfo(null)
+      return
+    }
+
+    try {
+      const shoe = await getShoeBySku(trimmedSku)
+      const hasImage = Boolean(shoe?.exact_match && shoe?.image_url)
+      setShoeImageInfo({
+        sku: shoe?.sku || trimmedSku,
+        name: shoe?.name || trimmedName,
+        brand: shoe?.brand || '',
+        hasImage,
+        exists: Boolean(shoe?.exact_match),
+        imageUrl: shoe?.exact_match ? (shoe?.image_url || '') : '',
+      })
+    } catch {
+      setShoeImageInfo({
+        sku: trimmedSku,
+        name: trimmedName,
+        brand: '',
+        hasImage: false,
+        exists: false,
+        imageUrl: '',
+      })
+    }
+  }
+
+  const openEdit = async (sale) => {
     setEditing(sale)
     setForm({
       order_number: sale.order_number ?? '',
@@ -198,11 +282,26 @@ export default function Sales() {
       status: sale.status ?? 'Pending',
       notes: sale.notes ?? '',
     })
+    setShoeImageInfo(null)
+    setShoeImageFile(null)
+    setShoeImageUrl('')
+    setShoeImagePreview('')
     setSaveError(null)
     setModalOpen(true)
+    await checkShoeImageStatus({ sku: sale.sku, shoeName: sale.shoe_name })
   }
 
   const set = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }))
+  const setShoeImageFileDirect = (file) => {
+    setShoeImageFile(file)
+    setShoeImageUrl('')
+    if (!file) setShoeImagePreview('')
+  }
+  const setShoeImageFromUrl = (url) => {
+    setShoeImageFile(null)
+    setShoeImageUrl(url)
+    setShoeImagePreview(url)
+  }
 
   const handleSave = async (e) => {
     e.preventDefault()
@@ -221,7 +320,28 @@ export default function Sales() {
       } else {
         await createSale(payload)
       }
-      setModalOpen(false)
+      if ((shoeImageFile || shoeImageUrl) && payload.sku && payload.shoe_name) {
+        try {
+          if (shoeImageFile) {
+            const formData = new FormData()
+            formData.append('sku', String(payload.sku).trim())
+            formData.append('name', String(payload.shoe_name).trim())
+            formData.append('image', shoeImageFile)
+            if (shoeImageInfo?.brand) formData.append('brand', shoeImageInfo.brand)
+            await ensureShoeWithImage(formData)
+          } else {
+            await ensureShoe({
+              sku: String(payload.sku).trim(),
+              name: String(payload.shoe_name).trim(),
+              brand: shoeImageInfo?.brand || '',
+              image_url: shoeImageUrl,
+            })
+          }
+        } catch (uploadErr) {
+          setError(uploadErr?.response?.data?.error || 'Sale saved, but shoe image upload failed.')
+        }
+      }
+      closeSaleModal()
       fetchData()
     } catch (err) {
       setSaveError(err?.response?.data?.error || err?.response?.data?.errors?.join(', ') || 'Save failed')
@@ -380,7 +500,7 @@ export default function Sales() {
 
         <div className="flex-1 p-4 space-y-6 sm:p-6">
         {summary && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
             <KPICard label="Total Sales" value={summary.total_sales ?? sales.length} />
             <KPICard label="Completed" value={summary.by_status?.Completed ?? '—'} />
             <KPICard label="Unmatched" value={summary.unmatched_sales ?? '—'} />
@@ -388,6 +508,11 @@ export default function Sales() {
             <KPICard
               label={`Completed Earnings (PHP est. @ ${phpRate || 0})`}
               value={summary.completed_earnings_usd != null ? formatPHP(usdToPhp(summary.completed_earnings_usd, phpRate)) : '—'}
+            />
+            <KPICard
+              label="Total Profit (PHP est.)"
+              value={completedProfitPhp != null ? formatPHP(completedProfitPhp) : 'â€”'}
+              valueClassName={completedProfitPhp != null && completedProfitPhp < 0 ? 'text-red-600' : 'text-emerald-600'}
             />
           </div>
         )}
@@ -402,6 +527,9 @@ export default function Sales() {
           <input type="text" placeholder="Order #…" value={orderSearch}
             onChange={e => setOrderSearch(e.target.value)}
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-32" />
+          <input type="month" value={saleMonth}
+            onChange={e => setSaleMonth(e.target.value)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto" />
           <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 shadow-sm cursor-pointer select-none whitespace-nowrap">
             <input
               type="checkbox"
@@ -618,7 +746,7 @@ export default function Sales() {
       </div>
 
       {modalOpen && (
-        <Modal title={editing ? `Edit Sale #${editing.order_number}` : 'Add Sale'} onClose={() => setModalOpen(false)}>
+        <Modal title={editing ? `Edit Sale #${editing.order_number}` : 'Add Sale'} onClose={closeSaleModal}>
           <form onSubmit={handleSave} className="space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Order Number">
@@ -629,16 +757,54 @@ export default function Sales() {
               </Field>
             </div>
             <Field label="Shoe Name">
-              <input type="text" required value={form.shoe_name} onChange={set('shoe_name')} className={INPUT} />
+              <input
+                type="text"
+                required
+                value={form.shoe_name}
+                onChange={set('shoe_name')}
+                onBlur={() => checkShoeImageStatus({ sku: form.sku, shoeName: form.shoe_name })}
+                className={INPUT}
+              />
             </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="SKU">
-                <input type="text" value={form.sku} onChange={set('sku')} className={INPUT} />
+                <input
+                  type="text"
+                  value={form.sku}
+                  onChange={(e) => {
+                    set('sku')(e)
+                    setShoeImageInfo(null)
+                    setShoeImageFile(null)
+                    setShoeImageUrl('')
+                    setShoeImagePreview('')
+                  }}
+                  onBlur={() => checkShoeImageStatus({ sku: form.sku, shoeName: form.shoe_name })}
+                  className={INPUT}
+                />
               </Field>
               <Field label="Size">
                 <input type="number" step="0.5" value={form.size} onChange={set('size')} className={INPUT} />
               </Field>
             </div>
+            {form.sku.trim() && shoeImageInfo && !shoeImageInfo.hasImage && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <p className="text-sm font-medium text-amber-900">
+                  {shoeImageInfo.exists
+                    ? 'This shoe record does not have an image yet.'
+                    : 'No shoe image was found for this SKU yet.'}
+                </p>
+                <p className="mt-1 text-xs text-amber-800">
+                  Uploading here will save the image to the shoe database while you save this sale.
+                </p>
+                <div className="mt-3">
+                  <ImageDropInput
+                    previewUrl={shoeImagePreview || shoeImageInfo.imageUrl}
+                    onFileChange={setShoeImageFileDirect}
+                    onImageUrl={setShoeImageFromUrl}
+                  />
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Sale Type">
                 <select value={form.sale_type} onChange={set('sale_type')} className={INPUT}>
@@ -681,7 +847,7 @@ export default function Sales() {
             </Field>
             {saveError && <p className="text-sm text-red-500">{saveError}</p>}
             <div className="flex justify-end gap-3 pt-2">
-              <button type="button" onClick={() => setModalOpen(false)}
+              <button type="button" onClick={closeSaleModal}
                 className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
               <button type="submit" disabled={saving}
                 className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">

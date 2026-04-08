@@ -4,10 +4,13 @@ import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
+import ImageDropInput from '../components/common/ImageDropInput'
 import { exportToCsv } from '../utils/csv'
+import { exportSellingWorkbook } from '../utils/excel'
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import {
   getInventory,
+  getInventorySummary,
   createInventoryItem,
   createInventoryItems,
   updateInventoryItem,
@@ -16,6 +19,7 @@ import {
   getPricingSuggestion,
   getShoes,
   ensureShoe,
+  ensureShoeWithImage,
   getPurchaseCosts,
 } from '../services/api'
 
@@ -23,9 +27,10 @@ function formatPHP(value) {
   const num = parseFloat(value) || 0
   return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(num)
 }
-function formatUSD(value) {
-  if (value == null) return '—'
-  return `$${parseFloat(value).toFixed(2)}`
+function formatSizeLabel(size) {
+  const num = Number(size)
+  if (!Number.isFinite(num)) return String(size ?? '')
+  return Number.isInteger(num) ? String(num) : String(num)
 }
 function formatDate(dateStr) {
   if (!dateStr) return '—'
@@ -115,17 +120,6 @@ function inferBrandFromSku(rawSku) {
   return ''
 }
 
-function canExpandShoeName(currentName, suggestedName) {
-  const current = String(currentName || '').trim()
-  const suggested = String(suggestedName || '').trim()
-  if (!current || !suggested) return false
-  if (current === suggested) return false
-  return (
-    suggested.toLowerCase().startsWith(current.toLowerCase()) &&
-    suggested.length > current.length
-  )
-}
-
 const EMPTY_ITEM = {
   sku: '', shoe_name: '', size: '', status: 'Available',
   brand: '',
@@ -137,6 +131,7 @@ const EMPTY_SHOE_ITEM = {
   sku: '',
   name: '',
   brand: '',
+  image_url: '',
 }
 const INVENTORY_CSV_COLUMNS = [
   { key: 'sku', label: 'SKU' },
@@ -150,10 +145,19 @@ const INVENTORY_CSV_COLUMNS = [
   { key: 'notes', label: 'Notes' },
   { key: 'linked_sale_id', label: 'Linked Sale ID' },
 ]
-
 export default function Inventory() {
+  const INVENTORY_PER_PAGE = 100
   const [items, setItems] = useState([])
+  const [sellingItems, setSellingItems] = useState([])
   const [shoes, setShoes] = useState([])
+  const [inventorySummary, setInventorySummary] = useState({
+    total_items: 0,
+    active_count: 0,
+    active_value_php: 0,
+    by_status: {},
+  })
+  const [inventoryPage, setInventoryPage] = useState(1)
+  const [inventoryPages, setInventoryPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
@@ -162,10 +166,16 @@ export default function Inventory() {
   const [activeView, setActiveView] = useState('inventory')
   const [shoeBrandFilter, setShoeBrandFilter] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [selectedSellingIds, setSelectedSellingIds] = useState([])
+  const [sellingExportBusy, setSellingExportBusy] = useState(false)
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(EMPTY_ITEM)
+  const [itemShoeImageInfo, setItemShoeImageInfo] = useState(null)
+  const [itemShoeImageFile, setItemShoeImageFile] = useState(null)
+  const [itemShoeImageUrl, setItemShoeImageUrl] = useState('')
+  const [itemShoeImagePreview, setItemShoeImagePreview] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
   const [bulkMode, setBulkMode] = useState(false)
@@ -173,7 +183,11 @@ export default function Inventory() {
   const [availablePurchaseCosts, setAvailablePurchaseCosts] = useState([])
 
   const [shoeModalOpen, setShoeModalOpen] = useState(false)
+  const [editingShoe, setEditingShoe] = useState(null)
   const [shoeForm, setShoeForm] = useState(EMPTY_SHOE_ITEM)
+  const [shoeImageFile, setShoeImageFile] = useState(null)
+  const [shoeImageUrl, setShoeImageUrl] = useState('')
+  const [shoeImagePreview, setShoeImagePreview] = useState('')
   const [shoeSaving, setShoeSaving] = useState(false)
   const [shoeSaveError, setShoeSaveError] = useState(null)
 
@@ -181,13 +195,13 @@ export default function Inventory() {
     setLoading(true)
     setError(null)
 
-    const fetchAllPages = async (requestFn, baseParams) => {
+    const fetchAllPages = async (requestFn, baseParams, { forceAllPages = false } = {}) => {
       const perPage = 100
       const allRows = []
       let pageNum = 1
       const q = searchQuery.trim()
       const shouldFetchAll = Boolean(q)
-      if (!shouldFetchAll) {
+      if (!forceAllPages && !shouldFetchAll) {
         const firstData = await requestFn({ ...baseParams, page: pageNum, per_page: 200 })
         return Array.isArray(firstData) ? firstData : firstData.inventory || firstData.shoes || firstData.items || []
       }
@@ -228,6 +242,24 @@ export default function Inventory() {
       return
     }
 
+    if (activeView === 'selling') {
+      try {
+        const params = {}
+        if (statusFilter) params.status = statusFilter
+        if (sizeFilter !== '') params.size = sizeFilter
+        if (sizeTypeFilter) params.size_type = sizeTypeFilter
+        const q = searchQuery.trim()
+        if (q) params.q = q
+        const rows = await fetchAllPages((requestParams) => getInventory(requestParams), params, { forceAllPages: true })
+        setSellingItems(Array.isArray(rows) ? rows : [])
+      } catch (err) {
+        setError(err?.response?.data?.error || 'Failed to load selling inventory')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
     try {
       const params = {}
       if (statusFilter) params.status = statusFilter
@@ -235,16 +267,46 @@ export default function Inventory() {
       if (sizeTypeFilter) params.size_type = sizeTypeFilter
       const q = searchQuery.trim()
       if (q) params.q = q
-      const rows = await fetchAllPages((requestParams) => getInventory(requestParams), params)
+      const [inventoryData, summaryData] = await Promise.all([
+        getInventory({ ...params, page: inventoryPage, per_page: INVENTORY_PER_PAGE }),
+        getInventorySummary(params),
+      ])
+      const rows = Array.isArray(inventoryData) ? inventoryData : inventoryData.inventory || inventoryData.items || []
       setItems(Array.isArray(rows) ? rows : [])
+      setSellingItems([])
+      setInventoryPages(Math.max(1, inventoryData?.pages || 1))
+      setInventorySummary(summaryData || {
+        total_items: 0,
+        active_count: 0,
+        active_value_php: 0,
+        by_status: {},
+      })
     } catch (err) {
       setError(err?.response?.data?.error || 'Failed to load inventory')
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, searchQuery])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, searchQuery, inventoryPage])
 
   useEffect(() => { fetchData() }, [fetchData])
+
+  useEffect(() => {
+    setInventoryPage(1)
+  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery, activeView])
+
+  useEffect(() => {
+    if (!itemShoeImageFile) return undefined
+    const previewUrl = URL.createObjectURL(itemShoeImageFile)
+    setItemShoeImagePreview(previewUrl)
+    return () => URL.revokeObjectURL(previewUrl)
+  }, [itemShoeImageFile])
+
+  useEffect(() => {
+    if (!shoeImageFile) return undefined
+    const previewUrl = URL.createObjectURL(shoeImageFile)
+    setShoeImagePreview(previewUrl)
+    return () => URL.revokeObjectURL(previewUrl)
+  }, [shoeImageFile])
 
   const shoeBrandData = Object.entries(
     shoes.reduce((acc, item) => {
@@ -265,6 +327,8 @@ export default function Inventory() {
     while (true) {
       const params = { page: pageNum, per_page: perPage }
       if (statusFilter) params.status = statusFilter
+      if (sizeFilter !== '') params.size = sizeFilter
+      if (sizeTypeFilter) params.size_type = sizeTypeFilter
       if (q) params.q = q
       const data = await getInventory(params)
       const rows = Array.isArray(data) ? data : data.inventory || data.items || []
@@ -280,14 +344,24 @@ export default function Inventory() {
       pageNum += 1
     }
     return allItems
-  }, [statusFilter, searchQuery])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery])
 
-  const totalValue = items.reduce((sum, i) => sum + parseFloat(i.purchase_cost || 0), 0)
+  const totalValue = inventorySummary?.active_value_php || 0
   const hasInventoryTags = items.some((item) => parseInventoryTags(item.notes).length > 0)
+  const sellingHasInventoryTags = sellingItems.some((item) => parseInventoryTags(item.notes).length > 0)
+  const sellableItems = sellingItems.filter((item) => item.status === 'Available' && item.listed_price != null)
+  const sellableItemIds = new Set(sellableItems.map((item) => item.inventory_id))
+  const selectedSellingItems = sellingItems.filter((item) => selectedSellingIds.includes(item.inventory_id) && item.status === 'Available' && item.listed_price != null)
+  const selectedSellableCount = selectedSellingItems.length
+  const selectedSellingRevenue = selectedSellingItems.reduce((sum, item) => sum + (parseFloat(item.listed_price || 0) || 0), 0)
+  const selectedSellingProfit = selectedSellingItems.reduce((sum, item) => sum + ((parseFloat(item.listed_price || 0) || 0) - (parseFloat(item.purchase_cost || 0) || 0)), 0)
 
   const openAdd = () => {
     setEditing(null)
     setForm({ ...EMPTY_ITEM, date_purchased: toDatetimeLocal(new Date().toISOString()) })
+    setItemShoeImageInfo(null)
+    setItemShoeImageFile(null)
+    setItemShoeImagePreview('')
     setBulkMode(true)
     setBulkItems([{ ...EMPTY_BULK_ITEM }])
     setAvailablePurchaseCosts([])
@@ -309,20 +383,79 @@ export default function Inventory() {
       source: item.source ?? '',
       tags: parseInventoryTags(item.notes),
     })
+    setItemShoeImageInfo(null)
+    setItemShoeImageFile(null)
+    setItemShoeImageUrl('')
+    setItemShoeImagePreview('')
     setBulkMode(false)
     setBulkItems([{ ...EMPTY_BULK_ITEM }])
     setAvailablePurchaseCosts([])
     setSaveError(null)
     setModalOpen(true)
+    void checkInventoryShoeImageStatus({ sku: item.sku, shoeName: item.shoe_name })
   }
 
   const openAddShoe = () => {
+    setEditingShoe(null)
     setShoeForm(EMPTY_SHOE_ITEM)
+    setShoeImageFile(null)
+    setShoeImageUrl('')
+    setShoeImagePreview('')
+    setShoeSaveError(null)
+    setShoeModalOpen(true)
+  }
+
+  const closeInventoryModal = () => {
+    setModalOpen(false)
+    setEditing(null)
+    setItemShoeImageInfo(null)
+    setItemShoeImageFile(null)
+    setItemShoeImageUrl('')
+    setItemShoeImagePreview('')
+    setSaveError(null)
+  }
+
+  const closeShoeModal = () => {
+    setShoeModalOpen(false)
+    setEditingShoe(null)
+    setShoeImageFile(null)
+    setShoeImageUrl('')
+    setShoeImagePreview('')
+    setShoeSaveError(null)
+  }
+
+  const openEditShoe = (shoe) => {
+    setEditingShoe(shoe)
+    setShoeForm({
+      sku: shoe.sku ?? '',
+      name: shoe.name ?? '',
+      brand: shoe.brand ?? '',
+      image_url: shoe.image_url ?? '',
+    })
+    setShoeImageFile(null)
+    setShoeImageUrl('')
+    setShoeImagePreview('')
     setShoeSaveError(null)
     setShoeModalOpen(true)
   }
 
   const setField = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }))
+  const getPreferredInventoryBrand = (fallbackBrand = '') => {
+    const explicitBrand = String(form.brand || '').trim()
+    return explicitBrand || String(fallbackBrand || '').trim()
+  }
+  const setInventoryShoeImageFile = (file) => {
+    setItemShoeImageFile(file)
+    setItemShoeImageUrl('')
+    if (!file) {
+      setItemShoeImagePreview('')
+    }
+  }
+  const setInventoryShoeImageFromUrl = (url) => {
+    setItemShoeImageFile(null)
+    setItemShoeImageUrl(url)
+    setItemShoeImagePreview(url)
+  }
   const setTag = (tag) => setForm(f => ({
     ...f,
     tags: f.tags.includes(tag) ? f.tags.filter((item) => item !== tag) : [...f.tags, tag],
@@ -331,15 +464,67 @@ export default function Inventory() {
     setBulkItems(items => items.map((item, i) => (i === idx ? { ...item, [field]: e.target.value } : item)))
   }
   const setShoeField = (field) => (e) => setShoeForm(f => ({ ...f, [field]: e.target.value }))
+  const setShoeImageFileDirect = (file) => {
+    setShoeImageFile(file)
+    setShoeImageUrl('')
+    if (!file) {
+      setShoeImagePreview('')
+    }
+  }
+  const setShoeImageFromUrl = (url) => {
+    setShoeImageFile(null)
+    setShoeImageUrl(url)
+    setShoeImagePreview(url)
+  }
   const addBulkItem = () => setBulkItems(items => [...items, { ...EMPTY_BULK_ITEM }])
   const removeBulkItem = (idx) => setBulkItems(items => items.length === 1 ? items : items.filter((_, i) => i !== idx))
+  const checkInventoryShoeImageStatus = async ({ sku, shoeName }) => {
+    const trimmedSku = String(sku || '').trim()
+    const trimmedName = String(shoeName || '').trim()
+
+    if (!trimmedSku) {
+      setItemShoeImageInfo(null)
+      return
+    }
+
+    try {
+      const shoe = await getShoeBySku(trimmedSku)
+      setItemShoeImageInfo({
+        sku: shoe?.sku || trimmedSku,
+        name: shoe?.name || trimmedName,
+        brand: shoe?.brand || '',
+        hasImage: Boolean(shoe?.exact_match && shoe?.image_url),
+        exists: Boolean(shoe?.exact_match),
+        imageUrl: shoe?.exact_match ? (shoe?.image_url || '') : '',
+        exactMatch: Boolean(shoe?.exact_match),
+      })
+    } catch {
+      const inferredBrand = inferBrandFromSku(trimmedSku)
+      setItemShoeImageInfo({
+        sku: trimmedSku,
+        name: trimmedName,
+        brand: inferredBrand,
+        hasImage: false,
+        exists: false,
+        imageUrl: '',
+        exactMatch: false,
+      })
+    }
+  }
   const autofillPurchaseCostFromSku = async (sku) => {
     if (editing) return
     if (!sku) return
     try {
-      const costsData = await getPurchaseCosts({ sku }).catch(() => ({ costs: [] }))
+      const costsData = await getPurchaseCosts({ sku }).catch(() => ({ costs: [], listed_price: null }))
       const costs = costsData.costs || []
       setAvailablePurchaseCosts(costs)
+      if (form.listed_price === '' && costsData?.listed_price != null) {
+        setForm(prev => (
+          prev.listed_price !== ''
+            ? prev
+            : { ...prev, listed_price: String(costsData.listed_price) }
+        ))
+      }
       if (form.purchase_cost !== '') return  // don't overwrite what the user typed
       if (costs.length === 1) {
         setForm(prev => ({ ...prev, purchase_cost: String(costs[0]) }))
@@ -366,11 +551,33 @@ export default function Inventory() {
           ...form,
           size: form.size !== '' ? Number(form.size) : undefined,
           purchase_cost: form.purchase_cost !== '' ? Number(form.purchase_cost) : undefined,
-          listed_price: form.listed_price !== '' ? Number(form.listed_price) : undefined,
+          listed_price: form.listed_price !== '' ? Number(form.listed_price) : null,
           notes: tagsFromFormValue(form.tags).length ? JSON.stringify(tagsFromFormValue(form.tags)) : '',
         }
         await updateInventoryItem(editing.inventory_id, payload)
-        setModalOpen(false)
+        if ((itemShoeImageFile || itemShoeImageUrl) && payload.sku && payload.shoe_name) {
+          try {
+            const preferredBrand = getPreferredInventoryBrand(itemShoeImageInfo?.brand)
+            if (itemShoeImageFile) {
+              const formData = new FormData()
+              formData.append('sku', String(payload.sku).trim())
+              formData.append('name', String(payload.shoe_name).trim())
+              formData.append('image', itemShoeImageFile)
+              if (preferredBrand) formData.append('brand', preferredBrand)
+              await ensureShoeWithImage(formData)
+            } else {
+              await ensureShoe({
+                sku: String(payload.sku).trim(),
+                name: String(payload.shoe_name).trim(),
+                brand: preferredBrand,
+                image_url: itemShoeImageUrl,
+              })
+            }
+          } catch (uploadErr) {
+            setError(uploadErr?.response?.data?.error || 'Inventory item saved, but shoe image upload failed.')
+          }
+        }
+        closeInventoryModal()
         fetchData()
       } else if (bulkMode) {
         const basePayload = {
@@ -406,7 +613,29 @@ export default function Inventory() {
           return
         }
         await createInventoryItems({ ...basePayload, items })
-        setModalOpen(false)
+        if ((itemShoeImageFile || itemShoeImageUrl) && basePayload.sku && basePayload.shoe_name) {
+          try {
+            const preferredBrand = getPreferredInventoryBrand(itemShoeImageInfo?.brand)
+            if (itemShoeImageFile) {
+              const formData = new FormData()
+              formData.append('sku', String(basePayload.sku).trim())
+              formData.append('name', String(basePayload.shoe_name).trim())
+              formData.append('image', itemShoeImageFile)
+              if (preferredBrand) formData.append('brand', preferredBrand)
+              await ensureShoeWithImage(formData)
+            } else {
+              await ensureShoe({
+                sku: String(basePayload.sku).trim(),
+                name: String(basePayload.shoe_name).trim(),
+                brand: preferredBrand,
+                image_url: itemShoeImageUrl,
+              })
+            }
+          } catch (uploadErr) {
+            setError(uploadErr?.response?.data?.error || 'Inventory item saved, but shoe image upload failed.')
+          }
+        }
+        closeInventoryModal()
         fetchData()
       } else {
         const payload = {
@@ -417,7 +646,29 @@ export default function Inventory() {
           notes: tagsFromFormValue(form.tags).length ? JSON.stringify(tagsFromFormValue(form.tags)) : '',
         }
         await createInventoryItem(payload)
-        setModalOpen(false)
+        if ((itemShoeImageFile || itemShoeImageUrl) && payload.sku && payload.shoe_name) {
+          try {
+            const preferredBrand = getPreferredInventoryBrand(itemShoeImageInfo?.brand)
+            if (itemShoeImageFile) {
+              const formData = new FormData()
+              formData.append('sku', String(payload.sku).trim())
+              formData.append('name', String(payload.shoe_name).trim())
+              formData.append('image', itemShoeImageFile)
+              if (preferredBrand) formData.append('brand', preferredBrand)
+              await ensureShoeWithImage(formData)
+            } else {
+              await ensureShoe({
+                sku: String(payload.sku).trim(),
+                name: String(payload.shoe_name).trim(),
+                brand: preferredBrand,
+                image_url: itemShoeImageUrl,
+              })
+            }
+          } catch (uploadErr) {
+            setError(uploadErr?.response?.data?.error || 'Inventory item saved, but shoe image upload failed.')
+          }
+        }
+        closeInventoryModal()
         fetchData()
       }
     } catch (err) {
@@ -443,6 +694,90 @@ export default function Inventory() {
       .catch((err) => setError(err?.response?.data?.error || 'Failed to export inventory data'))
   }
 
+  const toggleSellingSelection = (inventoryId) => {
+    setSelectedSellingIds((current) => (
+      current.includes(inventoryId)
+        ? current.filter((id) => id !== inventoryId)
+        : [...current, inventoryId]
+    ))
+  }
+
+  const toggleSelectAllSellable = () => {
+    const allEligibleIds = sellableItems.map((item) => item.inventory_id)
+    if (selectedSellableCount === allEligibleIds.length && allEligibleIds.length > 0) {
+      setSelectedSellingIds((current) => current.filter((id) => !sellableItemIds.has(id)))
+      return
+    }
+    setSelectedSellingIds((current) => {
+      const next = new Set(current)
+      allEligibleIds.forEach((id) => next.add(id))
+      return Array.from(next)
+    })
+  }
+
+  const buildSellingCsvRows = (selectedItems) => {
+    const grouped = new Map()
+
+    selectedItems.forEach((item) => {
+      const tags = parseInventoryTags(item.notes)
+      const key = [
+        item.image_url || '',
+        item.sku || '',
+        item.shoe_name || '',
+        item.brand || '',
+        item.listed_price ?? '',
+        tags.join(' | '),
+      ].join('||')
+
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          image: item.image_url || '',
+          sku: item.sku || '',
+          shoe_name: item.shoe_name || '',
+          brand: item.brand || '',
+          listed_price: item.listed_price != null ? parseFloat(item.listed_price) : '',
+          tags_notes: tags.join(', '),
+          sizeCounts: new Map(),
+        })
+      }
+
+      const group = grouped.get(key)
+      const sizeLabel = formatSizeLabel(item.size)
+      group.sizeCounts.set(sizeLabel, (group.sizeCounts.get(sizeLabel) || 0) + 1)
+    })
+
+    return Array.from(grouped.values()).map((group) => ({
+      image: group.image,
+      sku: group.sku,
+      shoe_name: group.shoe_name,
+      brand: group.brand,
+      available_sizes: Array.from(group.sizeCounts.entries())
+        .sort((a, b) => Number(a[0]) - Number(b[0]))
+        .map(([size, quantity]) => `${size} - ${quantity}`)
+        .join(', '),
+      listed_price: group.listed_price,
+      tags_notes: group.tags_notes,
+    }))
+  }
+
+  const handleExportSellingWorkbook = async () => {
+    const selectedItems = sellingItems.filter((item) => selectedSellingIds.includes(item.inventory_id) && item.status === 'Available' && item.listed_price != null)
+    if (!selectedItems.length) {
+      setError('Select at least one available item with a listed price to export a selling Excel file.')
+      return
+    }
+    setSellingExportBusy(true)
+    setError(null)
+    try {
+      const rows = buildSellingCsvRows(selectedItems)
+      await exportSellingWorkbook('inventory-selling-export.xlsx', rows)
+    } catch (err) {
+      setError(err?.message || 'Failed to export selling Excel file.')
+    } finally {
+      setSellingExportBusy(false)
+    }
+  }
+
   const handleSaveShoe = async (e) => {
     e.preventDefault()
     setShoeSaving(true)
@@ -457,8 +792,19 @@ export default function Inventory() {
         throw new Error('SKU and Shoe Name are required.')
       }
 
-      await ensureShoe(payload)
-      setShoeModalOpen(false)
+      if (shoeImageFile) {
+        const formData = new FormData()
+        formData.append('sku', payload.sku)
+        formData.append('name', payload.name)
+        formData.append('brand', payload.brand)
+        formData.append('image', shoeImageFile)
+        await ensureShoeWithImage(formData)
+      } else if (shoeImageUrl) {
+        await ensureShoe({ ...payload, image_url: shoeImageUrl })
+      } else {
+        await ensureShoe(payload)
+      }
+      closeShoeModal()
       fetchData()
     } catch (err) {
       setShoeSaveError(err?.message || err?.response?.data?.error || 'Could not save shoe')
@@ -480,6 +826,12 @@ export default function Inventory() {
             Inventory
           </button>
           <button
+            onClick={() => { setActiveView('selling'); setError(null) }}
+            className={`rounded-lg px-4 py-2 text-sm font-medium ${activeView === 'selling' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 border border-gray-200'}`}
+          >
+            Selling
+          </button>
+          <button
             onClick={() => { setActiveView('shoes'); setError(null) }}
             className={`rounded-lg px-4 py-2 text-sm font-medium ${activeView === 'shoes' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 border border-gray-200'}`}
           >
@@ -490,11 +842,19 @@ export default function Inventory() {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           {activeView === 'inventory' ? (
             <>
-              <KPICard label="Total Items" value={items.length} />
-              <KPICard label="Available" value={items.filter(i => i.status === 'Available').length} valueClassName="text-green-600" />
-              <KPICard label="Sold" value={items.filter(i => i.status === 'Sold').length} valueClassName="text-blue-600" />
-              <KPICard label="Consigned" value={items.filter(i => i.status === 'Consigned').length} valueClassName="text-yellow-600" />
+              <KPICard label="Total Items" value={inventorySummary?.total_items || 0} />
+              <KPICard label="Available" value={inventorySummary?.by_status?.Available?.count || 0} valueClassName="text-green-600" />
+              <KPICard label="Sold" value={inventorySummary?.by_status?.Sold?.count || 0} valueClassName="text-blue-600" />
+              <KPICard label="Consigned" value={inventorySummary?.by_status?.Consigned?.count || 0} valueClassName="text-yellow-600" />
               <KPICard label="Total Cost Value" value={formatPHP(totalValue)} />
+            </>
+          ) : activeView === 'selling' ? (
+            <>
+              <KPICard label="Selected For Sale" value={selectedSellableCount} />
+              <KPICard label="Total Revenue" value={formatPHP(selectedSellingRevenue)} valueClassName="text-emerald-600" />
+              <KPICard label="Projected Profit" value={formatPHP(selectedSellingProfit)} valueClassName="text-indigo-600" />
+              <KPICard label="Loaded Inventory Rows" value={sellingItems.length} />
+              <KPICard label="Sellable With Price" value={sellableItems.length} valueClassName="text-amber-600" />
             </>
           ) : (
             <div className="col-span-full rounded-xl border border-gray-100 bg-white p-5 h-80">
@@ -534,7 +894,7 @@ export default function Inventory() {
           <input type="text" placeholder="Search name or SKU…" value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto" />
-          {activeView === 'inventory' ? (
+          {activeView === 'inventory' || activeView === 'selling' ? (
             <>
               <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
                 className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto">
@@ -557,10 +917,19 @@ export default function Inventory() {
                 onChange={e => setSizeFilter(e.target.value)}
                 className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-24"
               />
-              <button onClick={handleExport}
-                className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
-                Export CSV
-              </button>
+              {activeView === 'inventory' && (
+                <button onClick={handleExport}
+                  className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
+                  Export CSV
+                </button>
+              )}
+              {activeView === 'selling' && (
+                <button onClick={handleExportSellingWorkbook}
+                  disabled={sellingExportBusy}
+                  className="w-full rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50 sm:w-auto">
+                  {sellingExportBusy ? 'Exporting Selling Excel…' : 'Export Selling Excel'}
+                </button>
+              )}
             </>
           ) : (
             <select value={shoeBrandFilter} onChange={e => setShoeBrandFilter(e.target.value)}
@@ -582,6 +951,9 @@ export default function Inventory() {
           ? (!items.length ? <EmptyState title="No inventory items" message="Try adjusting your filters." />
           : (
             <div className="overflow-x-auto">
+              <div className="border-b border-gray-100 bg-gray-50 px-4 py-3 text-xs text-gray-600">
+                Showing page {inventoryPage} of {inventoryPages} • {inventorySummary?.total_items || 0} total matching items
+              </div>
               <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
@@ -617,11 +989,165 @@ export default function Inventory() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{item.purchase_cost != null ? formatPHP(item.purchase_cost) : '—'}</td>
-                        <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{item.listed_price != null ? formatUSD(item.listed_price) : '—'}</td>
+                        <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
+                          {item.listed_price != null ? (
+                            formatPHP(item.listed_price)
+                          ) : (
+                            item.status === 'Available' ? (
+                              <button
+                                type="button"
+                                onClick={() => openEdit(item)}
+                                className="text-xs font-medium text-amber-700 hover:text-amber-900"
+                              >
+                                Add price
+                              </button>
+                            ) : '—'
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(item.date_purchased)}</td>
                         <td className="px-4 py-3 text-gray-500">{item.source || '—'}</td>
                         <td className="px-4 py-3 text-gray-500 font-mono text-xs">{item.linked_sale_id || '—'}</td>
                         {hasInventoryTags && (
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-2">
+                              {(parseInventoryTags(item.notes) || []).map((tag) => (
+                                <span key={`${item.inventory_id}-${tag}`} className="inline-flex rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-700">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        )}
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            <button onClick={() => openEdit(item)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                            <button onClick={() => handleDelete(item)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              <div className="flex items-center justify-between border-t border-gray-100 bg-white px-4 py-3 text-xs text-gray-600">
+                <span>
+                  Page {inventoryPage} of {inventoryPages}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setInventoryPage((page) => Math.max(1, page - 1))}
+                    disabled={inventoryPage <= 1}
+                    className="rounded-lg border border-gray-200 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInventoryPage((page) => Math.min(inventoryPages, page + 1))}
+                    disabled={inventoryPage >= inventoryPages}
+                    className="rounded-lg border border-gray-200 px-3 py-2 font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))
+          : activeView === 'selling'
+          ? (!sellingItems.length ? <EmptyState title="No selling inventory" message="Try adjusting your filters." />
+          : (
+            <div className="overflow-x-auto">
+              <div className="flex flex-col gap-2 border-b border-gray-100 bg-gray-50 px-4 py-3 text-xs text-gray-600 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-1">
+                  <div>
+                    Choose inventory rows to include in the selling Excel export. Only available items with a listed price can be selected.
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    Loaded {sellingItems.length} matching rows with no page cap.
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={toggleSelectAllSellable}
+                    className="font-medium text-indigo-600 hover:text-indigo-800"
+                  >
+                    {sellableItems.length > 0 && selectedSellableCount === sellableItems.length ? 'Clear selection' : 'Select all sellable'}
+                  </button>
+                  <span>{selectedSellableCount} selected</span>
+                </div>
+              </div>
+              <table className="w-full text-xs sm:text-sm">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    {[
+                      '', 'SKU', 'Shoe Name', 'Brand', 'Size', 'Status', 'Purchase Cost', 'Listed Price', 'Potential Profit', 'Date Purchased',
+                      'Source', 'Linked Sale',
+                      ...(sellingHasInventoryTags ? ['Tags'] : []),
+                      ''
+                    ].map(col => (
+                      <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {sellingItems.map((item, idx) => {
+                    const aging = item.status === 'Available' && isOldItem(item.date_purchased)
+                    const isSellable = item.status === 'Available' && item.listed_price != null
+                    const isSelected = selectedSellingIds.includes(item.inventory_id)
+                    const rowProfit = (parseFloat(item.listed_price || 0) || 0) - (parseFloat(item.purchase_cost || 0) || 0)
+                    return (
+                      <tr key={item.inventory_id || idx} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            disabled={!isSellable}
+                            onChange={() => toggleSellingSelection(item.inventory_id)}
+                            title={isSellable ? 'Include in selling Excel export' : 'Only available items with listed prices can be exported'}
+                            className="h-4 w-4 accent-indigo-600 disabled:cursor-not-allowed"
+                          />
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-gray-600 whitespace-nowrap">{item.sku || '—'}</td>
+                        <td className="px-4 py-3 max-w-xs">
+                          <span className="font-medium text-gray-900 truncate block">{item.shoe_name || '—'}</span>
+                          {aging && (
+                            <span className="text-xs text-orange-600 font-medium">
+                              Aging ({Math.floor((Date.now() - new Date(item.date_purchased).getTime()) / 86400000)}d)
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{item.brand || '—'}</td>
+                        <td className="px-4 py-3 text-gray-500">{item.size || '—'}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_STYLES[item.status] || 'bg-gray-100 text-gray-600'}`}>
+                            {item.status || '—'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{item.purchase_cost != null ? formatPHP(item.purchase_cost) : '—'}</td>
+                        <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
+                          {item.listed_price != null ? (
+                            formatPHP(item.listed_price)
+                          ) : (
+                            item.status === 'Available' ? (
+                              <button
+                                type="button"
+                                onClick={() => openEdit(item)}
+                                className="text-xs font-medium text-amber-700 hover:text-amber-900"
+                              >
+                                Add price
+                              </button>
+                            ) : '—'
+                          )}
+                        </td>
+                        <td className={`px-4 py-3 whitespace-nowrap ${rowProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                          {item.listed_price != null ? formatPHP(rowProfit) : '—'}
+                        </td>
+                        <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(item.date_purchased)}</td>
+                        <td className="px-4 py-3 text-gray-500">{item.source || '—'}</td>
+                        <td className="px-4 py-3 text-gray-500 font-mono text-xs">{item.linked_sale_id || '—'}</td>
+                        {sellingHasInventoryTags && (
                           <td className="px-4 py-3">
                             <div className="flex flex-wrap gap-2">
                               {(parseInventoryTags(item.notes) || []).map((tag) => (
@@ -651,7 +1177,7 @@ export default function Inventory() {
               <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    {['SKU', 'Brand', 'Shoe Name'].map(col => (
+                    {['Image', 'SKU', 'Brand', 'Shoe Name', ''].map(col => (
                       <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
                     ))}
                   </tr>
@@ -659,9 +1185,25 @@ export default function Inventory() {
                 <tbody className="divide-y divide-gray-50">
                   {shoes.map((shoe, idx) => (
                     <tr key={shoe.shoe_id || idx} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-4 py-3">
+                        {shoe.image_url ? (
+                          <img
+                            src={shoe.image_url}
+                            alt={shoe.name || shoe.sku || 'Shoe'}
+                            className="h-24 w-24 rounded-lg border border-gray-200 bg-gray-100 object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-24 w-24 items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50 text-[11px] uppercase tracking-wide text-gray-400">
+                            No Image
+                          </div>
+                        )}
+                      </td>
                       <td className="px-4 py-3 font-mono text-xs text-gray-600 whitespace-nowrap">{shoe.sku || '—'}</td>
                       <td className="px-4 py-3 text-gray-700">{shoe.brand || '—'}</td>
                       <td className="px-4 py-3 text-gray-900 max-w-xs">{shoe.name || '—'}</td>
+                      <td className="px-4 py-3">
+                        <button onClick={() => openEditShoe(shoe)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -672,10 +1214,17 @@ export default function Inventory() {
       </div>
 
       {modalOpen && (
-        <Modal title={editing ? `Edit — ${editing.shoe_name}` : 'Add Inventory Item'} onClose={() => setModalOpen(false)}>
+        <Modal title={editing ? `Edit — ${editing.shoe_name}` : 'Add Inventory Item'} onClose={closeInventoryModal}>
           <form onSubmit={handleSave} className="space-y-4">
             <Field label="Shoe Name">
-              <input type="text" required value={form.shoe_name} onChange={setField('shoe_name')} className={INPUT} />
+              <input
+                type="text"
+                required
+                value={form.shoe_name}
+                onChange={setField('shoe_name')}
+                onBlur={() => checkInventoryShoeImageStatus({ sku: form.sku, shoeName: form.shoe_name })}
+                className={INPUT}
+              />
             </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Brand">
@@ -689,7 +1238,12 @@ export default function Inventory() {
                   type="text"
                   required
                   value={form.sku}
-                  onChange={setField('sku')}
+                  onChange={(e) => {
+                    setField('sku')(e)
+                    setItemShoeImageInfo(null)
+                    setItemShoeImageFile(null)
+                    setItemShoeImagePreview('')
+                  }}
                   onBlur={async () => {
                     const sku = String(form.sku || '').trim()
                      if (!sku) return
@@ -698,15 +1252,35 @@ export default function Inventory() {
                       const inferredBrand = inferBrandFromSku(sku)
                       setForm((prev) => ({
                         ...prev,
-                        shoe_name: canExpandShoeName(prev.shoe_name, shoe.name)
-                          ? shoe.name
-                          : prev.shoe_name || shoe.name || prev.shoe_name,
-                        brand: prev.brand || shoe.brand || prev.brand || inferredBrand || '',
+                        shoe_name: String(prev.shoe_name || '').trim()
+                          ? prev.shoe_name
+                          : (shoe?.name || ''),
+                        brand: String(prev.brand || '').trim()
+                          ? prev.brand
+                          : (shoe?.brand || inferredBrand || ''),
                       }))
+                      setItemShoeImageInfo({
+                        sku: shoe?.sku || sku,
+                        name: shoe?.name || form.shoe_name || '',
+                        brand: getPreferredInventoryBrand(shoe?.brand || inferredBrand || ''),
+                        hasImage: Boolean(shoe?.exact_match && shoe?.image_url),
+                        exists: Boolean(shoe?.exact_match),
+                        imageUrl: shoe?.exact_match ? (shoe?.image_url || '') : '',
+                        exactMatch: Boolean(shoe?.exact_match),
+                      })
                      } catch {
                        // no-op: allow adding new model without existing shoe row
                       const inferredBrand = inferBrandFromSku(sku)
                       setForm((prev) => (prev.brand ? prev : { ...prev, brand: inferredBrand }))
+                      setItemShoeImageInfo({
+                        sku,
+                        name: form.shoe_name || '',
+                        brand: inferredBrand,
+                        hasImage: false,
+                        exists: false,
+                        imageUrl: '',
+                        exactMatch: false,
+                      })
                      }
                      await autofillPurchaseCostFromSku(sku)
                     }}
@@ -735,6 +1309,26 @@ export default function Inventory() {
                 </Field>
               ) : null}
             </div>
+
+            {form.sku.trim() && itemShoeImageInfo && !itemShoeImageInfo.hasImage && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <p className="text-sm font-medium text-amber-900">
+                  {itemShoeImageInfo.exists
+                    ? 'This shoe record does not have an image yet.'
+                    : 'No shoe image was found for this SKU yet.'}
+                </p>
+                <p className="mt-1 text-xs text-amber-800">
+                  Uploading here will save the image to the shoe database while you save this inventory item.
+                </p>
+                <div className="mt-3">
+                  <ImageDropInput
+                    previewUrl={itemShoeImagePreview || itemShoeImageInfo.imageUrl}
+                    onFileChange={setInventoryShoeImageFile}
+                    onImageUrl={setInventoryShoeImageFromUrl}
+                  />
+                </div>
+              </div>
+            )}
 
             {!editing && bulkMode && (
               <div className="space-y-3 border border-gray-100 rounded-lg p-3">
@@ -799,7 +1393,7 @@ export default function Inventory() {
               <Field label={!editing && availablePurchaseCosts.length > 1 ? 'Or enter a custom cost (PHP)' : 'Purchase Cost (PHP)'}>
                 <input type="number" step="0.01" required value={form.purchase_cost} onChange={setField('purchase_cost')} className={INPUT} />
               </Field>
-              <Field label="Listed Price (USD)">
+              <Field label="Listed Price (PHP)">
                 <input type="number" step="0.01" value={form.listed_price} onChange={setField('listed_price')} className={INPUT} />
               </Field>
             </div>
@@ -839,7 +1433,7 @@ export default function Inventory() {
             </Field>
             {saveError && <p className="text-sm text-red-500">{saveError}</p>}
             <div className="flex justify-end gap-3 pt-2">
-              <button type="button" onClick={() => setModalOpen(false)}
+              <button type="button" onClick={closeInventoryModal}
                 className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
               <button type="submit" disabled={saving}
                 className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
@@ -851,7 +1445,7 @@ export default function Inventory() {
       )}
 
       {shoeModalOpen && (
-        <Modal title="Add Shoe" onClose={() => setShoeModalOpen(false)}>
+        <Modal title={editingShoe ? `Edit Shoe — ${editingShoe.sku}` : 'Add Shoe'} onClose={closeShoeModal}>
           <form onSubmit={handleSaveShoe} className="space-y-4">
             <Field label="Shoe Name">
               <input
@@ -879,9 +1473,16 @@ export default function Inventory() {
                 />
               </Field>
             </div>
+            <Field label="Shoe Image">
+              <ImageDropInput
+                previewUrl={shoeImagePreview || shoeForm.image_url}
+                onFileChange={setShoeImageFileDirect}
+                onImageUrl={setShoeImageFromUrl}
+              />
+            </Field>
             {shoeSaveError && <p className="text-sm text-red-500">{shoeSaveError}</p>}
             <div className="flex justify-end gap-3 pt-2">
-              <button type="button" onClick={() => setShoeModalOpen(false)}
+              <button type="button" onClick={closeShoeModal}
                 className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
               <button type="submit" disabled={shoeSaving}
                 className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">

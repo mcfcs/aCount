@@ -185,7 +185,7 @@ export default function Settings() {
                   checked={forceScrape}
                   onChange={(e) => setForceScrape(e.target.checked)}
                 />
-                Force reprocess (re-scrape duplicates)
+                Force re-scrape previously processed emails
               </label>
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -196,7 +196,9 @@ export default function Settings() {
               >
                 {scrapeBusy ? 'Scraping...' : 'Run Scrape'}
               </button>
-              <p className="text-xs text-gray-500">Includes all Alias dates in selected date window.</p>
+              <p className="text-xs text-gray-500">
+                Includes all Alias emails in the selected date window. Turn on force re-scrape when old emails need to be processed again for image import fixes.
+              </p>
             </div>
           </form>
 

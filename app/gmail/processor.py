@@ -17,11 +17,12 @@ from app import db
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from app.models.models import (
-    Sale, Inventory, BankTransfer, BankTransferAllocation, Expense, EmailProcessingLog,
+    Sale, Inventory, BankTransfer, BankTransferAllocation, Expense, EmailProcessingLog, Shoe,
 )
 from app.gmail.classifier import classify_email
 from app.gmail import parsers
 from app.time_utils import now, date_today
+from app.shoe_images import save_shoe_image_bytes
 from app.shoe_utils import ensure_shoe_exists
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ def _apply_status_inventory_side_effects(sale: Sale, status_updated: bool, new_s
 _WRONG_SIZE_SKU_KEYWORDS = {"wrong size", "wrong sku", "incorrect size", "incorrect sku"}
 
 
-def process_message(gmail_message_id: str, subject: str, sender: str, body: str, sent_at=None) -> dict:
+def process_message(gmail_message_id: str, subject: str, sender: str, body: str, sent_at=None, shoe_image=None) -> dict:
     """
     Main entry point. Processes one Gmail message end-to-end.
     Returns a summary dict: {email_type, status, record_type, record_id, error}
@@ -171,7 +172,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
     status = "Success"
 
     try:
-        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at)
+        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image)
         if result:
             record_type, record_id = result
     except Exception as e:
@@ -204,18 +205,18 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
 # Dispatch table
 # =============================================================================
 
-def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None):
+def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None):
     """Route to the correct handler. Returns (record_type, record_id) or None."""
 
     if email_type == "Sale":
         data = parsers.parse_sale_notification(subject, body)
         parsed_data.update(data)
-        return _handle_sale(data, sent_at=sent_at)
+        return _handle_sale(data, sent_at=sent_at, shoe_image=shoe_image)
 
     elif email_type == "Confirmation":
         data = parsers.parse_confirmation(subject, body)
         parsed_data.update(data)
-        return _handle_confirmation(data)
+        return _handle_confirmation(data, shoe_image=shoe_image)
 
     elif email_type == "Shipped":
         data = parsers.parse_order_number_only(subject, body)
@@ -258,7 +259,44 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_
 # Handlers — one per email type
 # =============================================================================
 
-def _handle_sale(data: dict, sent_at=None):
+def _persist_sale_shoe_image_if_missing(data: dict, shoe_image: dict | None) -> str | None:
+    if not shoe_image or not data.get("sku"):
+        return None
+
+    existing_shoe = Shoe.query.filter_by(sku=data.get("sku")).first()
+    if existing_shoe and existing_shoe.image_path:
+        return existing_shoe.image_path
+
+    try:
+        return save_shoe_image_bytes(
+            shoe_image.get("data"),
+            filename=shoe_image.get("filename"),
+            content_type=shoe_image.get("content_type"),
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Could not persist shoe image for SKU {data.get('sku')} from Gmail message: {exc}"
+        )
+        return None
+
+
+def _maybe_backfill_shoe_from_email(data: dict, shoe_image: dict | None) -> str | None:
+    if not data.get("sku"):
+        return None
+
+    image_path = _persist_sale_shoe_image_if_missing(data, shoe_image)
+    created, _ = ensure_shoe_exists(
+        data.get("sku"),
+        data.get("shoe_name"),
+        brand=None,
+        image_path=image_path,
+    )
+    if created or image_path:
+        db.session.flush()
+    return image_path
+
+
+def _handle_sale(data: dict, sent_at=None, shoe_image=None):
     """
     Spec 4.2 steps 1–5: Create Sale record + FIFO inventory match.
     """
@@ -266,15 +304,10 @@ def _handle_sale(data: dict, sent_at=None):
     if not order_number:
         raise ValueError("Could not parse order_number from sale email.")
 
+    image_path = _maybe_backfill_shoe_from_email(data, shoe_image)
+
     existing_sale = Sale.query.filter_by(order_number=order_number).first()
     if existing_sale:
-        created, _ = ensure_shoe_exists(
-            data.get("sku"),
-            data.get("shoe_name"),
-            brand=None,
-        )
-        if created:
-            db.session.commit()
         if existing_sale.status in MATCH_ELIGIBLE_STATUSES and existing_sale.inventory_match_status != "Matched":
             _match_sale_inventory(existing_sale)
         if existing_sale.purchase_cost is None:
@@ -286,12 +319,6 @@ def _handle_sale(data: dict, sent_at=None):
     # Consignment sales are auto-confirmed by Alias — no separate Confirmation email arrives
     sale_type = data.get("sale_type", "Regular")
     initial_status = "Confirmed" if sale_type == "Consignment" else "Pending"
-
-    created, _ = ensure_shoe_exists(
-        data.get("sku"),
-        data.get("shoe_name"),
-        brand=None,
-    )
 
     sale = Sale(
         order_number=order_number,
@@ -356,13 +383,16 @@ def _handle_sale(data: dict, sent_at=None):
     return "Sale", sale.sale_id
 
 
-def _handle_confirmation(data: dict):
+def _handle_confirmation(data: dict, shoe_image=None):
     """
     Spec 4.2 step 20: Update sale to Confirmed, store deadline + pickup info.
     Never downgrades a sale that has already moved past Confirmed.
     """
+    image_path = _maybe_backfill_shoe_from_email(data, shoe_image)
     sale = _find_sale(data.get("order_number"))
     if not sale:
+        if image_path:
+            db.session.commit()
         return None
 
     status_updated = _set_sale_status_if_advanced(sale, "Confirmed")

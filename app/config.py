@@ -9,6 +9,7 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-in-production")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     JSON_SORT_KEYS = False
+    SHOES_IMAGE_UPLOAD_DIR = os.getenv("SHOES_IMAGE_UPLOAD_DIR")
 
 
 class DevelopmentConfig(Config):

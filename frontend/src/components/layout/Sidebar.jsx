@@ -75,7 +75,6 @@ export default function Sidebar({ isOpen = false, onClose = () => {} }) {
           className="rounded-md border border-gray-700 px-2 py-1 text-sm text-gray-200 lg:hidden"
           aria-label="Close navigation"
         >
-          ×
         </button>
       </div>
 

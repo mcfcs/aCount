@@ -2,11 +2,13 @@
 Shoe Master API Routes.
 """
 
-from flask import Blueprint, request, jsonify
 import re
+
+from flask import Blueprint, request, jsonify, send_from_directory
 
 from app import db
 from app.models.models import Shoe
+from app.shoe_images import get_shoe_image_upload_dir, save_uploaded_shoe_image, save_shoe_image_from_url
 from app.shoe_utils import ensure_shoe_exists
 from sqlalchemy import or_
 
@@ -83,8 +85,12 @@ def get_shoe_by_sku(sku: str):
 
     def derive_model_name(name):
         cleaned = (name or "").strip()
-        # Strip trailing colorway/variant in quotes, keep base model (e.g. AF1 '07)
-        return re.sub(r"\s+'[^']+'$", "", cleaned).strip() if "'" in cleaned else cleaned
+        # Strip trailing colorway/variant in straight or curly quotes, keep the base model.
+        # Examples:
+        #   Wmns Air Jordan 1 Mid 'French Blue' -> Wmns Air Jordan 1 Mid
+        #   Wmns Air Jordan 1 Mid ‘French Blue’ -> Wmns Air Jordan 1 Mid
+        # Keep model names like AF1 '07' because they end in digits, not a colorway phrase.
+        return re.sub(r"\s+['‘’][^'‘’]*[A-Za-z][^'‘’]*['‘’]$", "", cleaned).strip()
 
     def derive_new_balance_name_from_sku(sku_value):
         text = re.sub(r"\s+", "", str(sku_value or "").upper())
@@ -98,7 +104,9 @@ def get_shoe_by_sku(sku: str):
 
     shoe = Shoe.query.filter_by(sku=trimmed).first()
     if shoe:
-        return jsonify(shoe.to_dict()), 200
+        payload = shoe.to_dict()
+        payload["exact_match"] = True
+        return jsonify(payload), 200
 
     prefix = trimmed.split(" ", 1)[0]
     shoe = Shoe.query.filter(Shoe.sku.ilike(f"{prefix}%")).first()
@@ -109,30 +117,57 @@ def get_shoe_by_sku(sku: str):
                 "sku": trimmed,
                 "name": inferred_name,
                 "brand": "New Balance",
-                "status": "inferred"
+                "status": "inferred",
+                "exact_match": False,
             }), 200
         return jsonify({"error": "No shoe found for this SKU."}), 404
 
     payload = shoe.to_dict()
     payload["name"] = derive_model_name(payload["name"])
+    payload["exact_match"] = False
     return jsonify(payload), 200
+
+
+@shoes_bp.get("/image/<path:filename>")
+def get_shoe_image(filename: str):
+    return send_from_directory(get_shoe_image_upload_dir(), filename)
 
 
 @shoes_bp.post("/ensure")
 def ensure_shoe():
     """
     POST /api/shoes/ensure
-    Payload: { sku, name, brand? }
+    Payload: { sku, name, brand?, image? }
     """
-    data = request.get_json(silent=True) or {}
+    if request.content_type and "multipart/form-data" in request.content_type.lower():
+        data = request.form
+        image_file = request.files.get("image")
+    else:
+        data = request.get_json(silent=True) or {}
+        image_file = None
+
     sku = data.get("sku")
     name = data.get("name")
     brand = data.get("brand")
+    image_url = data.get("image_url")
+    image_path = None
 
     if not sku:
         return jsonify({"error": "'sku' is required."}), 400
 
-    created, shoe = ensure_shoe_exists(sku, name, brand=brand)
+    try:
+        if image_file and image_file.filename:
+            image_path = save_uploaded_shoe_image(image_file)
+        elif image_url:
+            image_path = save_shoe_image_from_url(image_url)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    created, shoe = ensure_shoe_exists(sku, name, brand=brand, image_path=image_path)
+    if shoe and name:
+        shoe.name = str(name).strip() or shoe.name
+    if shoe and brand:
+        shoe.brand = str(brand).strip() or shoe.brand
     db.session.commit()
     return jsonify({
         "created": created,

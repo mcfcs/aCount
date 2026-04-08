@@ -16,8 +16,9 @@ import threading
 from typing import Optional
 
 from app.gmail.auth import get_gmail_service
-from app.gmail.parsers import get_message_parts
+from app.gmail.parsers import get_message_parts, extract_largest_image_part
 from app.gmail.processor import process_message
+from app.gmail.classifier import classify_email
 from googleapiclient.errors import HttpError
 from app.time_utils import now
 
@@ -128,7 +129,9 @@ def poll_once(app) -> dict:
                 ).execute()
 
                 subject, sender, body, sent_at = get_message_parts(full_msg)
-                result = process_message(msg_id, subject, sender, body, sent_at=sent_at)
+                email_type = classify_email(sender, subject, body)
+                shoe_image = extract_largest_image_part(service, full_msg) if email_type in {"Sale", "Confirmation"} else None
+                result = process_message(msg_id, subject, sender, body, sent_at=sent_at, shoe_image=shoe_image)
                 results.append(result)
 
                 if result.get("status") != "skipped":
@@ -334,7 +337,9 @@ def _scrape_date_range_internal(
                 ).execute()
 
                 subject, sender, body, sent_at = get_message_parts(full_msg)
-                result = process_message(msg_id, subject, sender, body, sent_at=sent_at)
+                email_type = classify_email(sender, subject, body)
+                shoe_image = extract_largest_image_part(service, full_msg) if email_type in {"Sale", "Confirmation"} else None
+                result = process_message(msg_id, subject, sender, body, sent_at=sent_at, shoe_image=shoe_image)
                 results.append(result)
 
                 if result.get("status") == "skipped":

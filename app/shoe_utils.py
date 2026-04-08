@@ -31,7 +31,12 @@ def infer_brand_from_name(shoe_name: str | None) -> str:
     return "Other"
 
 
-def ensure_shoe_exists(sku: Optional[str], shoe_name: Optional[str], brand: Optional[str] = None) -> Tuple[bool, Optional[Shoe]]:
+def ensure_shoe_exists(
+    sku: Optional[str],
+    shoe_name: Optional[str],
+    brand: Optional[str] = None,
+    image_path: Optional[str] = None,
+) -> Tuple[bool, Optional[Shoe]]:
     """
     Ensure a Shoes row exists for the given SKU.
     Returns (created, Shoe | None).
@@ -55,9 +60,11 @@ def ensure_shoe_exists(sku: Optional[str], shoe_name: Optional[str], brand: Opti
             shoe.name = normalized_name
         if shoe.brand == "Other" and final_brand != "Other":
             shoe.brand = final_brand
+        if image_path:
+            shoe.image_path = image_path
         return False, shoe
 
-    new_shoe = Shoe(sku=sku, name=normalized_name, brand=final_brand)
+    new_shoe = Shoe(sku=sku, name=normalized_name, brand=final_brand, image_path=image_path)
     db.session.add(new_shoe)
     return True, new_shoe
 

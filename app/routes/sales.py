@@ -26,6 +26,69 @@ VALID_BOX_CONDITIONS = ("Good Condition", "No Box", "Badly Damaged")
 VALID_CANCELLATION_TYPES = ("Unconfirmed", "Confirmed", "Attention Needed")
 VALID_MATCH_STATUSES = ("Matched", "Unmatched")
 
+
+def _apply_sales_filters(query, args):
+    status = args.get("status")
+    if status:
+        query = query.filter(Sale.status == status)
+
+    sku = args.get("sku")
+    if sku:
+        query = query.filter(Sale.sku.ilike(f"%{sku}%"))
+
+    shoe_name = args.get("shoe_name")
+    if shoe_name:
+        query = query.filter(Sale.shoe_name.ilike(f"%{shoe_name}%"))
+
+    order_number = args.get("order_number")
+    if order_number:
+        try:
+            query = query.filter(Sale.order_number == int(order_number))
+        except ValueError:
+            pass
+
+    inventory_match = args.get("inventory_match_status")
+    if inventory_match:
+        query = query.filter(Sale.inventory_match_status == inventory_match)
+
+    matchable = args.get("matchable")
+    if matchable == "1":
+        inv_skus = db.session.query(Inventory.sku).filter(
+            Inventory.purchase_cost.isnot(None),
+            Inventory.purchase_cost > 0,
+        )
+        sale_skus = db.session.query(Sale.sku).filter(
+            Sale.purchase_cost.isnot(None),
+            Sale.purchase_cost > 0,
+        )
+        query = query.filter(
+            Sale.purchase_cost.is_(None),
+            db.or_(
+                Sale.sku.in_(inv_skus),
+                Sale.sku.in_(sale_skus),
+            ),
+        )
+
+    platform = args.get("platform")
+    if platform:
+        query = query.filter(Sale.platform.ilike(f"%{platform}%"))
+
+    date_from = args.get("date_from")
+    if date_from:
+        try:
+            query = query.filter(Sale.sale_date >= datetime.fromisoformat(str(date_from)))
+        except ValueError:
+            pass
+
+    date_to = args.get("date_to")
+    if date_to:
+        try:
+            query = query.filter(Sale.sale_date <= datetime.fromisoformat(str(date_to)))
+        except ValueError:
+            pass
+
+    return query
+
 # Allowed status transitions (Spec Section 2.1.1)
 ALLOWED_TRANSITIONS = {
     "Pending":          ("Confirmed", "Cancelled"),
@@ -260,53 +323,7 @@ def list_sales():
     GET /api/sales
     Query params: status, sku, order_number, shoe_name, page, per_page, sort_by, order
     """
-    query = Sale.query
-
-    # Filters
-    status = request.args.get("status")
-    if status:
-        query = query.filter(Sale.status == status)
-
-    sku = request.args.get("sku")
-    if sku:
-        query = query.filter(Sale.sku.ilike(f"%{sku}%"))
-
-    shoe_name = request.args.get("shoe_name")
-    if shoe_name:
-        query = query.filter(Sale.shoe_name.ilike(f"%{shoe_name}%"))
-
-    order_number = request.args.get("order_number")
-    if order_number:
-        try:
-            query = query.filter(Sale.order_number == int(order_number))
-        except ValueError:
-            pass
-
-    inventory_match = request.args.get("inventory_match_status")
-    if inventory_match:
-        query = query.filter(Sale.inventory_match_status == inventory_match)
-
-    matchable = request.args.get("matchable")
-    if matchable == "1":
-        inv_skus = db.session.query(Inventory.sku).filter(
-            Inventory.purchase_cost.isnot(None),
-            Inventory.purchase_cost > 0,
-        )
-        sale_skus = db.session.query(Sale.sku).filter(
-            Sale.purchase_cost.isnot(None),
-            Sale.purchase_cost > 0,
-        )
-        query = query.filter(
-            Sale.purchase_cost.is_(None),
-            db.or_(
-                Sale.sku.in_(inv_skus),
-                Sale.sku.in_(sale_skus),
-            ),
-        )
-
-    platform = request.args.get("platform")
-    if platform:
-        query = query.filter(Sale.platform.ilike(f"%{platform}%"))
+    query = _apply_sales_filters(Sale.query, request.args)
 
     # Sorting
     sort_by = request.args.get("sort_by", "sale_date")
@@ -618,24 +635,50 @@ def sales_summary():
     GET /api/sales/summary
     Dashboard KPIs: sales by status, totals, unmatched count.
     """
+    filtered = _apply_sales_filters(Sale.query, request.args).with_entities(
+        Sale.sale_id,
+        Sale.status,
+        Sale.inventory_match_status,
+        Sale.amount_made,
+        Sale.purchase_cost,
+    ).subquery()
+
     status_counts = (
-        db.session.query(Sale.status, func.count(Sale.sale_id))
-        .group_by(Sale.status)
+        db.session.query(filtered.c.status, func.count(filtered.c.sale_id))
+        .group_by(filtered.c.status)
         .all()
     )
 
     by_status = {status: count for status, count in status_counts}
 
-    total_sales = sum(by_status.values())
+    total_sales = db.session.query(func.count(filtered.c.sale_id)).scalar() or 0
     unmatched = (
-        db.session.query(func.count(Sale.sale_id))
-        .filter(Sale.inventory_match_status == "Unmatched")
+        db.session.query(func.count(filtered.c.sale_id))
+        .filter(filtered.c.inventory_match_status == "Unmatched")
         .scalar()
     ) or 0
 
     total_amount_made_usd = (
-        db.session.query(func.coalesce(func.sum(Sale.amount_made), 0))
-        .filter(Sale.status == "Completed")
+        db.session.query(func.coalesce(func.sum(filtered.c.amount_made), 0))
+        .filter(filtered.c.status == "Completed")
+        .scalar()
+    )
+
+    total_purchase_cost_php = (
+        db.session.query(func.coalesce(func.sum(filtered.c.purchase_cost), 0))
+        .filter(
+            filtered.c.amount_made.isnot(None),
+            filtered.c.purchase_cost.isnot(None),
+        )
+        .scalar()
+    )
+
+    profit_amount_made_usd = (
+        db.session.query(func.coalesce(func.sum(filtered.c.amount_made), 0))
+        .filter(
+            filtered.c.amount_made.isnot(None),
+            filtered.c.purchase_cost.isnot(None),
+        )
         .scalar()
     )
 
@@ -644,6 +687,8 @@ def sales_summary():
         "by_status": by_status,
         "unmatched_sales": unmatched,
         "completed_earnings_usd": float(total_amount_made_usd),
+        "profit_earnings_usd": float(profit_amount_made_usd),
+        "profit_purchase_cost_php": float(total_purchase_cost_php),
     }), 200
 
 

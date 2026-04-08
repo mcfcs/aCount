@@ -41,6 +41,7 @@ class Shoe(db.Model):
     sku = db.Column(db.String(100), nullable=False, unique=True)
     brand = db.Column(db.String(50), nullable=False, default="Other")
     name = db.Column(db.String(500), nullable=False)
+    image_path = db.Column(db.String(500), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=now)
     updated_at = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
 
@@ -50,6 +51,8 @@ class Shoe(db.Model):
             "sku": self.sku,
             "brand": self.brand,
             "name": self.name,
+            "image_path": self.image_path,
+            "image_url": f"/api/shoes/image/{self.image_path}" if self.image_path else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -67,7 +70,7 @@ class Inventory(db.Model):
     size            = db.Column(db.Float, nullable=False)
     date_purchased  = db.Column(db.DateTime, nullable=False)
     purchase_cost   = db.Column(db.Numeric(10, 2), nullable=False)      # PHP
-    listed_price    = db.Column(db.Numeric(10, 2), nullable=True)       # USD
+    listed_price    = db.Column(db.Numeric(10, 2), nullable=True)       # PHP
     status          = db.Column(
         db.String(20),
         nullable=False,
@@ -97,6 +100,8 @@ class Inventory(db.Model):
             "sku": self.sku,
             "shoe_name": self.shoe_name,
             "brand": self.shoe.brand if self.shoe else None,
+            "image_path": self.shoe.image_path if self.shoe else None,
+            "image_url": f"/api/shoes/image/{self.shoe.image_path}" if self.shoe and self.shoe.image_path else None,
             "size": self.size,
             "date_purchased": self.date_purchased.isoformat() if self.date_purchased else None,
             "purchase_cost": float(self.purchase_cost) if self.purchase_cost else None,

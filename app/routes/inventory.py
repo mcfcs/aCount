@@ -54,6 +54,62 @@ def _lowest_nonzero_purchase_cost(sku, exclude_sale_id=None, exclude_inventory_i
 VALID_STATUSES = ("Available", "Sold", "Consigned")
 
 
+def _apply_inventory_filters(query, args):
+    q = args.get("q")
+    if q:
+        keyword = f"%{q}%"
+        query = query.filter(
+            db.or_(
+                Inventory.sku.ilike(keyword),
+                Inventory.shoe_name.ilike(keyword),
+            )
+        )
+
+    status = args.get("status")
+    if status:
+        query = query.filter(Inventory.status == status)
+
+    sku = args.get("sku")
+    if sku:
+        query = query.filter(Inventory.sku.ilike(f"%{sku}%"))
+
+    shoe_name = args.get("shoe_name")
+    if shoe_name:
+        query = query.filter(Inventory.shoe_name.ilike(f"%{shoe_name}%"))
+
+    size = args.get("size")
+    if size:
+        try:
+            query = query.filter(Inventory.size == float(size))
+        except ValueError:
+            pass
+
+    size_type = args.get("size_type")
+    if size_type == "womens":
+        query = query.filter(
+            db.or_(
+                Inventory.shoe_name.ilike("%Wmns%"),
+                Inventory.shoe_name.ilike("%Women's%"),
+                Inventory.shoe_name.ilike("%Womens%"),
+            )
+        )
+    elif size_type == "kids":
+        query = query.filter(Inventory.shoe_name.ilike("%GS%"))
+    elif size_type == "mens":
+        query = query.filter(
+            ~Inventory.shoe_name.ilike("%Wmns%"),
+            ~Inventory.shoe_name.ilike("%Women's%"),
+            ~Inventory.shoe_name.ilike("%Womens%"),
+            ~Inventory.shoe_name.ilike("%GS%"),
+        )
+
+    source = args.get("source")
+    if source:
+        query = query.filter(Inventory.source.ilike(f"%{source}%"))
+
+    return query
+
+
 def _parse_inventory_payload(data, is_update=False):
     """Validate and parse incoming inventory JSON. Returns (dict, error_msg)."""
     errors = []
@@ -84,11 +140,14 @@ def _parse_inventory_payload(data, is_update=False):
             parsed["purchase_cost"] = float(data["purchase_cost"])
         except (ValueError, TypeError):
             errors.append("'purchase_cost' must be a number.")
-    if "listed_price" in data and data["listed_price"] is not None:
-        try:
-            parsed["listed_price"] = float(data["listed_price"])
-        except (ValueError, TypeError):
-            errors.append("'listed_price' must be a number.")
+    if "listed_price" in data:
+        if data["listed_price"] in (None, ""):
+            parsed["listed_price"] = None
+        else:
+            try:
+                parsed["listed_price"] = float(data["listed_price"])
+            except (ValueError, TypeError):
+                errors.append("'listed_price' must be a number.")
     if "status" in data:
         if data["status"] not in VALID_STATUSES:
             errors.append(f"'status' must be one of {VALID_STATUSES}.")
@@ -116,60 +175,7 @@ def list_inventory():
     GET /api/inventory
     Query params: status, sku, size, page, per_page, sort_by, order
     """
-    query = Inventory.query
-
-    # Filters
-    q = request.args.get("q")
-    if q:
-        keyword = f"%{q}%"
-        query = query.filter(
-            db.or_(
-                Inventory.sku.ilike(keyword),
-                Inventory.shoe_name.ilike(keyword),
-            )
-        )
-
-    status = request.args.get("status")
-    if status:
-        query = query.filter(Inventory.status == status)
-
-    sku = request.args.get("sku")
-    if sku:
-        query = query.filter(Inventory.sku.ilike(f"%{sku}%"))
-
-    shoe_name = request.args.get("shoe_name")
-    if shoe_name:
-        query = query.filter(Inventory.shoe_name.ilike(f"%{shoe_name}%"))
-
-    size = request.args.get("size")
-    if size:
-        try:
-            query = query.filter(Inventory.size == float(size))
-        except ValueError:
-            pass
-
-    size_type = request.args.get("size_type")
-    if size_type == "womens":
-        query = query.filter(
-            db.or_(
-                Inventory.shoe_name.ilike("%Wmns%"),
-                Inventory.shoe_name.ilike("%Women's%"),
-                Inventory.shoe_name.ilike("%Womens%"),
-            )
-        )
-    elif size_type == "kids":
-        query = query.filter(Inventory.shoe_name.ilike("%GS%"))
-    elif size_type == "mens":
-        query = query.filter(
-            ~Inventory.shoe_name.ilike("%Wmns%"),
-            ~Inventory.shoe_name.ilike("%Women's%"),
-            ~Inventory.shoe_name.ilike("%Womens%"),
-            ~Inventory.shoe_name.ilike("%GS%"),
-        )
-
-    source = request.args.get("source")
-    if source:
-        query = query.filter(Inventory.source.ilike(f"%{source}%"))
+    query = _apply_inventory_filters(Inventory.query, request.args)
 
     # Sorting
     sort_by = request.args.get("sort_by", "created_at")
@@ -183,7 +189,7 @@ def list_inventory():
     # Pagination
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 25, type=int)
-    per_page = min(per_page, 100)  # cap
+    per_page = min(per_page, 100)
 
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
@@ -429,7 +435,8 @@ def get_purchase_costs():
     """
     GET /api/inventory/purchase-costs?sku=XXX
     Returns all distinct non-zero purchase costs recorded for a SKU
-    across both Inventory and Sales tables, sorted ascending.
+    across both Inventory and Sales tables, sorted ascending, plus the
+    most recently recorded listed price from Inventory for that SKU.
     """
     sku = request.args.get("sku", "").strip()
     if not sku:
@@ -458,7 +465,22 @@ def get_purchase_costs():
     )
 
     all_costs = sorted({float(r[0]) for r in inv_costs + sale_costs})
-    return jsonify({"sku": sku, "costs": all_costs}), 200
+    latest_listed_price = (
+        db.session.query(Inventory.listed_price)
+        .filter(
+            Inventory.sku == sku,
+            Inventory.listed_price.isnot(None),
+        )
+        .order_by(Inventory.updated_at.desc(), Inventory.created_at.desc(), Inventory.inventory_id.desc())
+        .limit(1)
+        .scalar()
+    )
+
+    return jsonify({
+        "sku": sku,
+        "costs": all_costs,
+        "listed_price": float(latest_listed_price) if latest_listed_price is not None else None,
+    }), 200
 
 
 # ---- Summary endpoint -----------------------------------------------------
@@ -471,23 +493,31 @@ def inventory_summary():
     """
     from sqlalchemy import func
 
+    query = _apply_inventory_filters(Inventory.query, request.args)
+
+    filtered = query.with_entities(
+        Inventory.inventory_id,
+        Inventory.status,
+        Inventory.purchase_cost,
+    ).subquery()
+
     stats = (
         db.session.query(
-            Inventory.status,
-            func.count(Inventory.inventory_id).label("count"),
-            func.coalesce(func.sum(Inventory.purchase_cost), 0).label("total_cost"),
+            filtered.c.status,
+            func.count(filtered.c.inventory_id).label("count"),
+            func.coalesce(func.sum(filtered.c.purchase_cost), 0).label("total_cost"),
         )
-        .group_by(Inventory.status)
+        .group_by(filtered.c.status)
         .all()
     )
 
+    total_count = db.session.query(func.count(filtered.c.inventory_id)).scalar() or 0
+
     breakdown = {}
-    total_count = 0
     total_value = 0.0
 
     for status, count, cost in stats:
         breakdown[status] = {"count": count, "value_php": float(cost)}
-        total_count += count
         if status == "Available":
             total_value = float(cost)
 
