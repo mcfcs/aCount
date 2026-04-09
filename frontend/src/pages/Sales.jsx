@@ -607,7 +607,7 @@ export default function Sales() {
                         {usdToPhp(sale.amount_made, phpRate) != null ? formatPHP(usdToPhp(sale.amount_made, phpRate)) : '—'}
                       </td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.purchase_cost != null ? formatPHP(sale.purchase_cost) : '—'}</td>
-                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
+                    <td className={`px-4 py-3 whitespace-nowrap ${calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate) < 0 ? 'text-red-500' : 'text-gray-700'}`}>
                         {calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate) != null
                           ? formatPHP(calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate))
                           : '—'}
