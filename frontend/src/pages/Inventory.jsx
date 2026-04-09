@@ -32,6 +32,88 @@ function formatSizeLabel(size) {
   if (!Number.isFinite(num)) return String(size ?? '')
   return Number.isInteger(num) ? String(num) : String(num)
 }
+function normalizeSizeValue(size) {
+  if (size == null) return ''
+  const trimmed = String(size).trim()
+  if (!trimmed) return ''
+  const num = Number(trimmed)
+  return Number.isFinite(num) ? String(num) : trimmed
+}
+function sortSizeValues(a, b) {
+  const aNum = Number(a)
+  const bNum = Number(b)
+  const aIsNum = Number.isFinite(aNum)
+  const bIsNum = Number.isFinite(bNum)
+  if (aIsNum && bIsNum) return aNum - bNum
+  if (aIsNum) return -1
+  if (bIsNum) return 1
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+}
+function hasStandaloneToken(text, token) {
+  return new RegExp(`(^|[^A-Za-z0-9])${token}([^A-Za-z0-9]|$)`, 'i').test(String(text || ''))
+}
+function isWomensInventoryItem(row) {
+  const name = String(row?.shoe_name || '')
+  return /\bWmns\b/i.test(name) || /\bWomen's\b/i.test(name) || /\bWomens\b/i.test(name)
+}
+function isGsInventoryItem(row) {
+  return hasStandaloneToken(row?.shoe_name, 'GS')
+}
+function isPsTdInventoryItem(row) {
+  return hasStandaloneToken(row?.shoe_name, 'PS') || hasStandaloneToken(row?.shoe_name, 'TD')
+}
+function toWomensSizeLabel(size) {
+  const normalized = normalizeSizeValue(size)
+  if (!normalized) return ''
+  const numeric = Number(normalized)
+  if (!Number.isFinite(numeric)) return `${normalized}W`
+  return `${formatSizeLabel(numeric + 1.5)}W`
+}
+function getQuickSizeDisplayValue(row, { sizeMode = 'us', includeWomenSizes = false } = {}) {
+  const normalized = normalizeSizeValue(row?.size)
+  if (!normalized) return ''
+  const numeric = Number(normalized)
+  if (!Number.isFinite(numeric)) return normalized
+  if (sizeMode === 'womens') {
+    return isWomensInventoryItem(row) ? normalized : ''
+  }
+  if (includeWomenSizes && isWomensInventoryItem(row)) {
+    return normalizeSizeValue(numeric - 1.5)
+  }
+  return normalized
+}
+function shouldIncludePsTdItem(row, mode = 'exclude') {
+  const isPsTd = isPsTdInventoryItem(row)
+  if (mode === 'only') return isPsTd
+  if (mode === 'include') return true
+  return !isPsTd
+}
+function shouldIncludeForQuickSizeMode(row, { sizeMode = 'us', includeWomenSizes = false } = {}) {
+  if (sizeMode === 'womens') return isWomensInventoryItem(row)
+  if (isWomensInventoryItem(row)) return includeWomenSizes
+  return true
+}
+function collectQuickSizeOptions(rows, { sizeMode = 'us', includeWomenSizes = false, psTdMode = 'exclude' } = {}) {
+  const uniqueSizes = new Set()
+  rows.forEach((row) => {
+    if (!shouldIncludePsTdItem(row, psTdMode)) return
+    if (!shouldIncludeForQuickSizeMode(row, { sizeMode, includeWomenSizes })) return
+    const normalized = getQuickSizeDisplayValue(row, { sizeMode, includeWomenSizes })
+    if (normalized) uniqueSizes.add(normalized)
+  })
+  return Array.from(uniqueSizes)
+    .sort(sortSizeValues)
+    .map((value) => ({ value, label: formatSizeLabel(value) }))
+}
+function filterItemsBySelectedSizes(rows, selectedSizes, { sizeMode = 'us', includeWomenSizes = false, psTdMode = 'exclude' } = {}) {
+  const filteredByPsTd = rows.filter((row) => (
+    shouldIncludePsTdItem(row, psTdMode)
+      && shouldIncludeForQuickSizeMode(row, { sizeMode, includeWomenSizes })
+  ))
+  if (!selectedSizes.length) return filteredByPsTd
+  const selected = new Set(selectedSizes.map(normalizeSizeValue).filter(Boolean))
+  return filteredByPsTd.filter((row) => selected.has(getQuickSizeDisplayValue(row, { sizeMode, includeWomenSizes })))
+}
 function formatDate(dateStr) {
   if (!dateStr) return '—'
   try { return new Date(dateStr).toLocaleDateString('en-PH') } catch { return dateStr }
@@ -156,18 +238,27 @@ export default function Inventory() {
     active_value_php: 0,
     by_status: {},
   })
+  const [inventoryVisibleTotal, setInventoryVisibleTotal] = useState(0)
   const [inventoryPage, setInventoryPage] = useState(1)
   const [inventoryPages, setInventoryPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [sizeFilter, setSizeFilter] = useState('')
+  const [selectedSizeFilters, setSelectedSizeFilters] = useState([])
+  const [quickSizeMode, setQuickSizeMode] = useState('us')
+  const [includeWomenSizes, setIncludeWomenSizes] = useState(false)
+  const [psTdMode, setPsTdMode] = useState('exclude')
+  const [quickSizeRows, setQuickSizeRows] = useState([])
+  const [quickSizeOptionsLoaded, setQuickSizeOptionsLoaded] = useState(false)
   const [sizeTypeFilter, setSizeTypeFilter] = useState('')
   const [activeView, setActiveView] = useState('inventory')
   const [shoeBrandFilter, setShoeBrandFilter] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedSellingIds, setSelectedSellingIds] = useState([])
   const [sellingExportBusy, setSellingExportBusy] = useState(false)
+  const [sellingExportShowQuantity, setSellingExportShowQuantity] = useState(true)
+  const [sellingExportSizeBase, setSellingExportSizeBase] = useState('us')
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -190,6 +281,36 @@ export default function Inventory() {
   const [shoeImagePreview, setShoeImagePreview] = useState('')
   const [shoeSaving, setShoeSaving] = useState(false)
   const [shoeSaveError, setShoeSaveError] = useState(null)
+
+  const refreshQuickSizeOptions = useCallback(async () => {
+    const allRows = []
+    let pageNum = 1
+    const perPage = 100
+
+    try {
+      while (true) {
+        const data = await getInventory({ status: 'Available', page: pageNum, per_page: perPage })
+        const rows = Array.isArray(data) ? data : data.inventory || data.items || []
+        const totalPages = data?.pages || Math.ceil((data?.total || 0) / perPage)
+        allRows.push(...rows)
+
+        if (data?.pages != null) {
+          if (pageNum >= totalPages) break
+        } else if (rows.length < perPage) {
+          break
+        } else if (data?.total && allRows.length >= data.total) {
+          break
+        }
+
+        pageNum += 1
+      }
+
+      setQuickSizeRows(allRows)
+      setQuickSizeOptionsLoaded(true)
+    } catch {
+      setQuickSizeOptionsLoaded(true)
+    }
+  }, [])
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -267,32 +388,74 @@ export default function Inventory() {
       if (sizeTypeFilter) params.size_type = sizeTypeFilter
       const q = searchQuery.trim()
       if (q) params.q = q
-      const [inventoryData, summaryData] = await Promise.all([
-        getInventory({ ...params, page: inventoryPage, per_page: INVENTORY_PER_PAGE }),
-        getInventorySummary(params),
-      ])
-      const rows = Array.isArray(inventoryData) ? inventoryData : inventoryData.inventory || inventoryData.items || []
-      setItems(Array.isArray(rows) ? rows : [])
-      setSellingItems([])
-      setInventoryPages(Math.max(1, inventoryData?.pages || 1))
-      setInventorySummary(summaryData || {
-        total_items: 0,
-        active_count: 0,
-        active_value_php: 0,
-        by_status: {},
-      })
+
+      const shouldApplyQuickSizeAcrossInventory = selectedSizeFilters.length > 0
+      if (shouldApplyQuickSizeAcrossInventory) {
+        const [allInventoryRows, summaryData] = await Promise.all([
+          fetchAllPages((requestParams) => getInventory(requestParams), params, { forceAllPages: true }),
+          getInventorySummary(params),
+        ])
+        const filteredRows = filterItemsBySelectedSizes(Array.isArray(allInventoryRows) ? allInventoryRows : [], selectedSizeFilters, {
+          sizeMode: quickSizeMode,
+          includeWomenSizes,
+          psTdMode,
+        })
+        const totalFilteredPages = Math.max(1, Math.ceil(filteredRows.length / INVENTORY_PER_PAGE))
+        const nextPage = Math.min(inventoryPage, totalFilteredPages)
+        const pageStart = (nextPage - 1) * INVENTORY_PER_PAGE
+        const pageRows = filteredRows.slice(pageStart, pageStart + INVENTORY_PER_PAGE)
+
+        setItems(pageRows)
+        setInventoryVisibleTotal(filteredRows.length)
+        setInventoryPages(totalFilteredPages)
+        if (nextPage !== inventoryPage) {
+          setInventoryPage(nextPage)
+        }
+        setSellingItems([])
+        setInventorySummary(summaryData || {
+          total_items: 0,
+          active_count: 0,
+          active_value_php: 0,
+          by_status: {},
+        })
+      } else {
+        const [inventoryData, summaryData] = await Promise.all([
+          getInventory({ ...params, page: inventoryPage, per_page: INVENTORY_PER_PAGE }),
+          getInventorySummary(params),
+        ])
+        const rows = Array.isArray(inventoryData) ? inventoryData : inventoryData.inventory || inventoryData.items || []
+        setItems(Array.isArray(rows) ? rows : [])
+        setInventoryVisibleTotal(Array.isArray(rows) ? rows.length : 0)
+        setInventoryPages(Math.max(1, inventoryData?.pages || 1))
+        setSellingItems([])
+        setInventorySummary(summaryData || {
+          total_items: 0,
+          active_count: 0,
+          active_value_php: 0,
+          by_status: {},
+        })
+      }
+
     } catch (err) {
       setError(err?.response?.data?.error || 'Failed to load inventory')
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, searchQuery, inventoryPage])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, searchQuery, inventoryPage, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
 
   useEffect(() => { fetchData() }, [fetchData])
 
   useEffect(() => {
     setInventoryPage(1)
-  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery, activeView])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery, activeView, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
+
+  useEffect(() => {
+    setSelectedSizeFilters([])
+  }, [quickSizeMode])
+
+  useEffect(() => {
+    void refreshQuickSizeOptions()
+  }, [refreshQuickSizeOptions])
 
   useEffect(() => {
     if (!itemShoeImageFile) return undefined
@@ -343,15 +506,25 @@ export default function Inventory() {
       }
       pageNum += 1
     }
-    return allItems
-  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery])
+    return filterItemsBySelectedSizes(allItems, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
 
+  const inventoryRows = filterItemsBySelectedSizes(items, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+  const sellingRows = filterItemsBySelectedSizes(sellingItems, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+  const sellingRowIdsKey = sellingRows.map((item) => item.inventory_id).join('|')
+  const fallbackQuickSizeOptions = collectQuickSizeOptions([
+    ...items.filter((item) => item?.status === 'Available'),
+    ...sellingItems.filter((item) => item?.status === 'Available'),
+  ], { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+  const visibleQuickSizeOptions = (quickSizeRows.length
+    ? collectQuickSizeOptions(quickSizeRows, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+    : fallbackQuickSizeOptions)
   const totalValue = inventorySummary?.active_value_php || 0
-  const hasInventoryTags = items.some((item) => parseInventoryTags(item.notes).length > 0)
-  const sellingHasInventoryTags = sellingItems.some((item) => parseInventoryTags(item.notes).length > 0)
-  const sellableItems = sellingItems.filter((item) => item.status === 'Available' && item.listed_price != null)
+  const hasInventoryTags = inventoryRows.some((item) => parseInventoryTags(item.notes).length > 0)
+  const sellingHasInventoryTags = sellingRows.some((item) => parseInventoryTags(item.notes).length > 0)
+  const sellableItems = sellingRows.filter((item) => item.status === 'Available' && item.listed_price != null)
   const sellableItemIds = new Set(sellableItems.map((item) => item.inventory_id))
-  const selectedSellingItems = sellingItems.filter((item) => selectedSellingIds.includes(item.inventory_id) && item.status === 'Available' && item.listed_price != null)
+  const selectedSellingItems = sellingRows.filter((item) => selectedSellingIds.includes(item.inventory_id) && item.status === 'Available' && item.listed_price != null)
   const selectedSellableCount = selectedSellingItems.length
   const selectedSellingRevenue = selectedSellingItems.reduce((sum, item) => sum + (parseFloat(item.listed_price || 0) || 0), 0)
   const selectedSellingProfit = selectedSellingItems.reduce((sum, item) => sum + ((parseFloat(item.listed_price || 0) || 0) - (parseFloat(item.purchase_cost || 0) || 0)), 0)
@@ -460,6 +633,13 @@ export default function Inventory() {
     ...f,
     tags: f.tags.includes(tag) ? f.tags.filter((item) => item !== tag) : [...f.tags, tag],
   }))
+  const toggleSizeFilterChip = (size) => {
+    setSelectedSizeFilters((current) => (
+      current.includes(size)
+        ? current.filter((item) => item !== size)
+        : [...current, size].sort(sortSizeValues)
+    ))
+  }
   const setBulkField = (idx, field) => (e) => {
     setBulkItems(items => items.map((item, i) => (i === idx ? { ...item, [field]: e.target.value } : item)))
   }
@@ -578,6 +758,7 @@ export default function Inventory() {
           }
         }
         closeInventoryModal()
+        await refreshQuickSizeOptions()
         fetchData()
       } else if (bulkMode) {
         const basePayload = {
@@ -636,6 +817,7 @@ export default function Inventory() {
           }
         }
         closeInventoryModal()
+        await refreshQuickSizeOptions()
         fetchData()
       } else {
         const payload = {
@@ -669,6 +851,7 @@ export default function Inventory() {
           }
         }
         closeInventoryModal()
+        await refreshQuickSizeOptions()
         fetchData()
       }
     } catch (err) {
@@ -682,6 +865,7 @@ export default function Inventory() {
     if (!window.confirm(`Delete ${item.shoe_name || item.sku || 'this item'}? This action cannot be undone.`)) return
     try {
       await deleteInventoryItem(item.inventory_id)
+      await refreshQuickSizeOptions()
       fetchData()
     } catch (err) {
       setError(err?.response?.data?.error || 'Delete failed')
@@ -715,7 +899,35 @@ export default function Inventory() {
     })
   }
 
-  const buildSellingCsvRows = (selectedItems) => {
+  useEffect(() => {
+    if (activeView !== 'selling') return
+    const visibleIds = new Set(sellingRows.map((item) => item.inventory_id))
+    setSelectedSellingIds((current) => {
+      const next = current.filter((id) => visibleIds.has(id))
+      return next.length === current.length ? current : next
+    })
+  }, [activeView, sellingRowIdsKey])
+
+  const formatSellingExportSizeLabel = (item, sizeBase = 'us') => {
+    const normalized = normalizeSizeValue(item?.size)
+    if (!normalized) return ''
+    const baseLabel = formatSizeLabel(normalized)
+    const womensLabel = isWomensInventoryItem(item) ? `${baseLabel}W` : toWomensSizeLabel(normalized)
+
+    if (sizeBase === 'womens') {
+      if (isWomensInventoryItem(item)) return womensLabel
+      return `${baseLabel} (${womensLabel})`
+    }
+
+    if (isWomensInventoryItem(item)) {
+      const usValue = normalizeSizeValue(Number(normalized) - 1.5)
+      return `${womensLabel} (${formatSizeLabel(usValue)} US)`
+    }
+
+    return baseLabel
+  }
+
+  const buildSellingCsvRows = (selectedItems, { showQuantity = true, sizeBase = 'us' } = {}) => {
     const grouped = new Map()
 
     selectedItems.forEach((item) => {
@@ -742,7 +954,7 @@ export default function Inventory() {
       }
 
       const group = grouped.get(key)
-      const sizeLabel = formatSizeLabel(item.size)
+      const sizeLabel = formatSellingExportSizeLabel(item, sizeBase)
       group.sizeCounts.set(sizeLabel, (group.sizeCounts.get(sizeLabel) || 0) + 1)
     })
 
@@ -752,8 +964,8 @@ export default function Inventory() {
       shoe_name: group.shoe_name,
       brand: group.brand,
       available_sizes: Array.from(group.sizeCounts.entries())
-        .sort((a, b) => Number(a[0]) - Number(b[0]))
-        .map(([size, quantity]) => `${size} - ${quantity}`)
+        .sort((a, b) => sortSizeValues(a[0], b[0]))
+        .map(([size, quantity]) => showQuantity ? `${size} - ${quantity}` : size)
         .join(', '),
       listed_price: group.listed_price,
       tags_notes: group.tags_notes,
@@ -761,7 +973,7 @@ export default function Inventory() {
   }
 
   const handleExportSellingWorkbook = async () => {
-    const selectedItems = sellingItems.filter((item) => selectedSellingIds.includes(item.inventory_id) && item.status === 'Available' && item.listed_price != null)
+    const selectedItems = sellingRows.filter((item) => selectedSellingIds.includes(item.inventory_id) && item.status === 'Available' && item.listed_price != null)
     if (!selectedItems.length) {
       setError('Select at least one available item with a listed price to export a selling Excel file.')
       return
@@ -769,8 +981,13 @@ export default function Inventory() {
     setSellingExportBusy(true)
     setError(null)
     try {
-      const rows = buildSellingCsvRows(selectedItems)
-      await exportSellingWorkbook('inventory-selling-export.xlsx', rows)
+      const rows = buildSellingCsvRows(selectedItems, {
+        showQuantity: sellingExportShowQuantity,
+        sizeBase: sellingExportSizeBase,
+      })
+      await exportSellingWorkbook('inventory-selling-export.xlsx', rows, {
+        showQuantity: sellingExportShowQuantity,
+      })
     } catch (err) {
       setError(err?.message || 'Failed to export selling Excel file.')
     } finally {
@@ -853,7 +1070,7 @@ export default function Inventory() {
               <KPICard label="Selected For Sale" value={selectedSellableCount} />
               <KPICard label="Total Revenue" value={formatPHP(selectedSellingRevenue)} valueClassName="text-emerald-600" />
               <KPICard label="Projected Profit" value={formatPHP(selectedSellingProfit)} valueClassName="text-indigo-600" />
-              <KPICard label="Loaded Inventory Rows" value={sellingItems.length} />
+              <KPICard label="Loaded Inventory Rows" value={sellingRows.length} />
               <KPICard label="Sellable With Price" value={sellableItems.length} valueClassName="text-amber-600" />
             </>
           ) : (
@@ -917,6 +1134,15 @@ export default function Inventory() {
                 onChange={e => setSizeFilter(e.target.value)}
                 className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-24"
               />
+              {selectedSizeFilters.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedSizeFilters([])}
+                  className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto"
+                >
+                  Clear size chips
+                </button>
+              )}
               {activeView === 'inventory' && (
                 <button onClick={handleExport}
                   className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
@@ -924,11 +1150,29 @@ export default function Inventory() {
                 </button>
               )}
               {activeView === 'selling' && (
-                <button onClick={handleExportSellingWorkbook}
-                  disabled={sellingExportBusy}
-                  className="w-full rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50 sm:w-auto">
-                  {sellingExportBusy ? 'Exporting Selling Excel…' : 'Export Selling Excel'}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setSellingExportShowQuantity((current) => !current)}
+                    className={`w-full rounded-lg border px-4 py-2 text-sm font-medium transition-colors sm:w-auto ${
+                      sellingExportShowQuantity
+                        ? 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                        : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    {sellingExportShowQuantity ? 'Show quantity' : 'Hide quantity'}
+                  </button>
+                  <select value={sellingExportSizeBase} onChange={e => setSellingExportSizeBase(e.target.value)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto">
+                    <option value="us">Translate sizes: US</option>
+                    <option value="womens">Translate sizes: Womens</option>
+                  </select>
+                  <button onClick={handleExportSellingWorkbook}
+                    disabled={sellingExportBusy}
+                    className="w-full rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50 sm:w-auto">
+                    {sellingExportBusy ? 'Exporting Selling Excel…' : 'Export Selling Excel'}
+                  </button>
+                </>
               )}
             </>
           ) : (
@@ -944,15 +1188,109 @@ export default function Inventory() {
           </button>
         </div>
 
+        {(activeView === 'inventory' || activeView === 'selling') && (visibleQuickSizeOptions.length > 0 || !quickSizeOptionsLoaded) && (
+          <div className="rounded-xl border border-gray-100 bg-white px-4 py-3">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+              Quick size filter
+            </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setQuickSizeMode('us')}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                  quickSizeMode === 'us'
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                    : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                }`}
+              >
+                US size
+              </button>
+              <button
+                type="button"
+                onClick={() => setQuickSizeMode('womens')}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                  quickSizeMode === 'womens'
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                    : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                }`}
+              >
+                Women size
+              </button>
+              {quickSizeMode === 'us' && (
+                <button
+                  type="button"
+                  onClick={() => setIncludeWomenSizes((current) => !current)}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    includeWomenSizes
+                      ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                      : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                  }`}
+                >
+                  Include women sizes
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setPsTdMode((current) => (current === 'include' ? 'exclude' : 'include'))}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                  psTdMode === 'include'
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                    : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                }`}
+              >
+                Include PS / TD sizes
+              </button>
+              <button
+                type="button"
+                onClick={() => setPsTdMode((current) => (current === 'only' ? 'exclude' : 'only'))}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                  psTdMode === 'only'
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                    : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                }`}
+              >
+                Only PS / TD sizes
+              </button>
+            </div>
+            <div className="mb-2 text-[11px] text-gray-500">
+              {quickSizeMode === 'us'
+                ? 'US size mode matches mens and GS directly. When enabled, women pairs match chip size plus 1.5.'
+                : 'Women size mode only shows women pairs and matches the exact women size on the shoe.'} PS / TD is detected from the shoe name.
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {visibleQuickSizeOptions.map((option) => {
+                const active = selectedSizeFilters.includes(option.value)
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => toggleSizeFilterChip(option.value)}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      active
+                        ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                        : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                )
+              })}
+              {!visibleQuickSizeOptions.length && (
+                <span className="text-xs text-gray-400">Loading sizes…</span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="rounded-xl shadow-sm border border-gray-100 bg-white overflow-hidden">
           {loading ? <LoadingSpinner className="py-12" />
           : error ? <p className="p-6 text-sm text-red-500">{error}</p>
           : activeView === 'inventory'
-          ? (!items.length ? <EmptyState title="No inventory items" message="Try adjusting your filters." />
+          ? (!inventoryRows.length ? <EmptyState title="No inventory items" message="Try adjusting your filters." />
           : (
             <div className="overflow-x-auto">
               <div className="border-b border-gray-100 bg-gray-50 px-4 py-3 text-xs text-gray-600">
-                Showing page {inventoryPage} of {inventoryPages} • {inventorySummary?.total_items || 0} total matching items
+                Showing page {inventoryPage} of {inventoryPages} • {inventoryRows.length} rows on this page • {inventoryVisibleTotal} visible rows • {inventorySummary?.total_items || 0} total matching items
               </div>
               <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
@@ -968,7 +1306,7 @@ export default function Inventory() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {items.map((item, idx) => {
+                  {inventoryRows.map((item, idx) => {
                     const aging = item.status === 'Available' && isOldItem(item.date_purchased)
                     return (
                       <tr key={item.inventory_id || idx} className="hover:bg-gray-50 transition-colors">
@@ -1055,7 +1393,7 @@ export default function Inventory() {
             </div>
           ))
           : activeView === 'selling'
-          ? (!sellingItems.length ? <EmptyState title="No selling inventory" message="Try adjusting your filters." />
+          ? (!sellingRows.length ? <EmptyState title="No selling inventory" message="Try adjusting your filters." />
           : (
             <div className="overflow-x-auto">
               <div className="flex flex-col gap-2 border-b border-gray-100 bg-gray-50 px-4 py-3 text-xs text-gray-600 sm:flex-row sm:items-center sm:justify-between">
@@ -1064,7 +1402,7 @@ export default function Inventory() {
                     Choose inventory rows to include in the selling Excel export. Only available items with a listed price can be selected.
                   </div>
                   <div className="text-[11px] text-gray-500">
-                    Loaded {sellingItems.length} matching rows with no page cap.
+                    Loaded {sellingRows.length} matching rows with no page cap.
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -1092,7 +1430,7 @@ export default function Inventory() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {sellingItems.map((item, idx) => {
+                  {sellingRows.map((item, idx) => {
                     const aging = item.status === 'Available' && isOldItem(item.date_purchased)
                     const isSellable = item.status === 'Available' && item.listed_price != null
                     const isSelected = selectedSellingIds.includes(item.inventory_id)
@@ -1495,5 +1833,3 @@ export default function Inventory() {
     </div>
   )
 }
-
-
