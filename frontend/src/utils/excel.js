@@ -45,7 +45,8 @@ function downloadBlob(filename, blob) {
   URL.revokeObjectURL(url)
 }
 
-export async function exportSellingWorkbook(filename, rows) {
+export async function exportSellingWorkbook(filename, rows, options = {}) {
+  const { showQuantity = true } = options
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'aCount'
   workbook.created = new Date()
@@ -59,7 +60,7 @@ export async function exportSellingWorkbook(filename, rows) {
     { header: 'Sku', key: 'sku', width: 18 },
     { header: 'Shoe Name', key: 'shoe_name', width: 36 },
     { header: 'Brand', key: 'brand', width: 18 },
-    { header: 'Available Sizes and quantity', key: 'available_sizes', width: 28 },
+    { header: showQuantity ? 'Available Sizes and quantity' : 'Available Sizes', key: 'available_sizes', width: 28 },
     { header: 'Listed Price (PHP)', key: 'listed_price', width: 18 },
     { header: 'Tags / Notes', key: 'tags_notes', width: 30 },
   ]
