@@ -13,6 +13,7 @@ import {
   getInventorySummary,
   createInventoryItem,
   createInventoryItems,
+  createSale,
   updateInventoryItem,
   deleteInventoryItem,
   getShoeBySku,
@@ -21,6 +22,7 @@ import {
   ensureShoe,
   ensureShoeWithImage,
   getPurchaseCosts,
+  linkInventoryToSale,
 } from '../services/api'
 
 function formatPHP(value) {
@@ -173,6 +175,13 @@ function parseInventoryTags(notes) {
   }
 }
 
+function buildInPersonSaleNotes(amountMadePhp) {
+  return JSON.stringify({
+    in_person_sale: true,
+    amount_made_php: amountMadePhp,
+  })
+}
+
 function tagsFromFormValue(value) {
   return Array.isArray(value) ? value.filter((tag) => String(tag).trim()) : []
 }
@@ -214,6 +223,9 @@ const EMPTY_SHOE_ITEM = {
   name: '',
   brand: '',
   image_url: '',
+}
+const EMPTY_SOLD_FORM = {
+  amount_made_php: '',
 }
 const INVENTORY_CSV_COLUMNS = [
   { key: 'sku', label: 'SKU' },
@@ -281,6 +293,11 @@ export default function Inventory() {
   const [shoeImagePreview, setShoeImagePreview] = useState('')
   const [shoeSaving, setShoeSaving] = useState(false)
   const [shoeSaveError, setShoeSaveError] = useState(null)
+  const [markSoldOpen, setMarkSoldOpen] = useState(false)
+  const [markingSoldItem, setMarkingSoldItem] = useState(null)
+  const [markSoldForm, setMarkSoldForm] = useState(EMPTY_SOLD_FORM)
+  const [markSoldSaving, setMarkSoldSaving] = useState(false)
+  const [markSoldError, setMarkSoldError] = useState(null)
 
   const refreshQuickSizeOptions = useCallback(async () => {
     const allRows = []
@@ -995,6 +1012,63 @@ export default function Inventory() {
     }
   }
 
+  const openMarkSold = (item) => {
+    setMarkingSoldItem(item)
+    setMarkSoldForm({
+      amount_made_php: item?.listed_price != null ? String(item.listed_price) : '',
+    })
+    setMarkSoldError(null)
+    setMarkSoldOpen(true)
+  }
+
+  const closeMarkSold = () => {
+    setMarkSoldOpen(false)
+    setMarkingSoldItem(null)
+    setMarkSoldForm(EMPTY_SOLD_FORM)
+    setMarkSoldSaving(false)
+    setMarkSoldError(null)
+  }
+
+  const handleConfirmMarkSold = async (e) => {
+    e.preventDefault()
+    if (!markingSoldItem) return
+
+    const amountMadePhp = Number(markSoldForm.amount_made_php)
+    if (!Number.isFinite(amountMadePhp) || amountMadePhp < 0) {
+      setMarkSoldError('Enter a valid amount made in PHP.')
+      return
+    }
+
+    setMarkSoldSaving(true)
+    setMarkSoldError(null)
+
+    try {
+      const sale = await createSale({
+        platform: 'In Person',
+        sale_type: 'In Person',
+        sku: markingSoldItem.sku,
+        shoe_name: markingSoldItem.shoe_name,
+        size: Number(markingSoldItem.size),
+        sale_date: new Date().toISOString(),
+        status: 'Completed',
+        selling_price: null,
+        amount_made: null,
+        condition: null,
+        box_condition: null,
+        notes: buildInPersonSaleNotes(amountMadePhp),
+      })
+
+      await linkInventoryToSale(markingSoldItem.inventory_id, sale.sale_id)
+      closeMarkSold()
+      await refreshQuickSizeOptions()
+      fetchData()
+    } catch (err) {
+      setMarkSoldError(err?.response?.data?.error || err?.response?.data?.errors?.join(', ') || 'Failed to mark item as sold.')
+    } finally {
+      setMarkSoldSaving(false)
+    }
+  }
+
   const handleSaveShoe = async (e) => {
     e.preventDefault()
     setShoeSaving(true)
@@ -1358,6 +1432,9 @@ export default function Inventory() {
                         )}
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
+                            {item.status === 'Available' && (
+                              <button onClick={() => openMarkSold(item)} className="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Mark as Sold</button>
+                            )}
                             <button onClick={() => openEdit(item)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
                             <button onClick={() => handleDelete(item)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
                           </div>
@@ -1498,6 +1575,9 @@ export default function Inventory() {
                         )}
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
+                            {item.status === 'Available' && (
+                              <button onClick={() => openMarkSold(item)} className="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Mark as Sold</button>
+                            )}
                             <button onClick={() => openEdit(item)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
                             <button onClick={() => handleDelete(item)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
                           </div>
@@ -1825,6 +1905,44 @@ export default function Inventory() {
               <button type="submit" disabled={shoeSaving}
                 className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
                 {shoeSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {markSoldOpen && markingSoldItem && (
+        <Modal title={`Mark as Sold — ${markingSoldItem.shoe_name || markingSoldItem.sku}`} onClose={closeMarkSold}>
+          <form onSubmit={handleConfirmMarkSold} className="space-y-4">
+            <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+              This will create a completed sale tagged as <span className="font-medium text-gray-900">In Person</span> and link this exact inventory item.
+            </div>
+            <Field label="Amount Made (PHP)">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                required
+                value={markSoldForm.amount_made_php}
+                onChange={(e) => setMarkSoldForm((current) => ({ ...current, amount_made_php: e.target.value }))}
+                className={INPUT}
+              />
+            </Field>
+            {markSoldError && <p className="text-sm text-red-500">{markSoldError}</p>}
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={closeMarkSold}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={markSoldSaving}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {markSoldSaving ? 'Saving...' : 'Confirm'}
               </button>
             </div>
           </form>

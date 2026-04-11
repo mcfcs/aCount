@@ -3,6 +3,8 @@ Sales API Routes — CRUD + lifecycle status transitions + FIFO matching.
 Spec references: Sections 2.1, 2.2.3, 4.2, 4.3, 5.2
 """
 
+import json
+
 from flask import Blueprint, request, jsonify
 from app import db
 from app.models.models import Sale, Inventory, Expense
@@ -25,6 +27,32 @@ VALID_CONDITIONS = ("New", "Used")
 VALID_BOX_CONDITIONS = ("Good Condition", "No Box", "Badly Damaged")
 VALID_CANCELLATION_TYPES = ("Unconfirmed", "Confirmed", "Attention Needed")
 VALID_MATCH_STATUSES = ("Matched", "Unmatched")
+
+
+def _generate_manual_order_number():
+    """
+    Generate a unique order number for non-Alias/manual sales.
+    Uses the current UTC timestamp in milliseconds and increments if needed.
+    """
+    candidate = int(datetime.utcnow().timestamp() * 1000)
+    while Sale.query.filter_by(order_number=candidate).first() is not None:
+        candidate += 1
+    return candidate
+
+
+def _extract_amount_made_php(notes):
+    """Extract PHP earnings for manual/in-person sales from structured notes."""
+    if not notes:
+        return None
+    try:
+        parsed = json.loads(notes)
+    except (TypeError, ValueError):
+        return None
+    value = parsed.get("amount_made_php") if isinstance(parsed, dict) else None
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _apply_sales_filters(query, args):
@@ -108,8 +136,13 @@ def _parse_sale_payload(data, is_update=False):
     """Validate and parse incoming sale JSON."""
     errors = []
 
+    is_in_person = str(data.get("platform") or "").strip().lower() == "in person"
+
     if not is_update:
-        for field in ("order_number", "sku", "shoe_name", "size", "sale_date"):
+        required_fields = ("sku", "shoe_name", "size", "sale_date")
+        if not is_in_person:
+            required_fields = ("order_number", *required_fields)
+        for field in required_fields:
             if field not in data or data[field] is None:
                 errors.append(f"'{field}' is required.")
 
@@ -124,7 +157,7 @@ def _parse_sale_payload(data, is_update=False):
                 errors.append(f"'{int_field}' must be an integer.")
 
     # Strings
-    for str_field in ("platform", "sku", "shoe_name", "issue_type",
+    for str_field in ("platform", "sale_type", "sku", "shoe_name", "issue_type",
                        "pickup_address", "pickup_window", "tracking_number", "notes"):
         if str_field in data:
             parsed[str_field] = data[str_field]
@@ -396,6 +429,9 @@ def create_sale():
         brand=None,
     )
 
+    if "order_number" not in parsed:
+        parsed["order_number"] = _generate_manual_order_number()
+
     sale = Sale(**parsed)
     if "status" not in parsed:
         sale.status = "Pending"
@@ -641,6 +677,7 @@ def sales_summary():
         Sale.inventory_match_status,
         Sale.amount_made,
         Sale.purchase_cost,
+        Sale.notes,
     ).subquery()
 
     status_counts = (
@@ -682,13 +719,34 @@ def sales_summary():
         .scalar()
     )
 
+    rows = db.session.query(
+        filtered.c.status,
+        filtered.c.amount_made,
+        filtered.c.purchase_cost,
+        filtered.c.notes,
+    ).all()
+
+    completed_earnings_php = 0.0
+    profit_earnings_php = 0.0
+    manual_purchase_cost_php = 0.0
+    for row in rows:
+        manual_amount_php = _extract_amount_made_php(row.notes)
+        if row.status == "Completed" and manual_amount_php is not None:
+            completed_earnings_php += manual_amount_php
+        if manual_amount_php is not None and row.purchase_cost is not None:
+            profit_earnings_php += manual_amount_php
+            if row.amount_made is None:
+                manual_purchase_cost_php += float(row.purchase_cost)
+
     return jsonify({
         "total_sales": total_sales,
         "by_status": by_status,
         "unmatched_sales": unmatched,
         "completed_earnings_usd": float(total_amount_made_usd),
+        "completed_earnings_php": float(completed_earnings_php),
         "profit_earnings_usd": float(profit_amount_made_usd),
-        "profit_purchase_cost_php": float(total_purchase_cost_php),
+        "profit_earnings_php": float(profit_earnings_php),
+        "profit_purchase_cost_php": float(total_purchase_cost_php) + float(manual_purchase_cost_php),
     }), 200
 
 

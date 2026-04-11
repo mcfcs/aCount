@@ -25,6 +25,16 @@ function calculateProfitPhp(amountMade, purchaseCost, phpRate) {
   return parseFloat(amountMadePhp) - parseFloat(purchaseCost)
 }
 
+function getManualAmountMadePhp(sale) {
+  try {
+    const parsed = JSON.parse(sale?.notes || '')
+    const value = parsed?.amount_made_php
+    return value != null && Number.isFinite(Number(value)) ? Number(value) : null
+  } catch {
+    return null
+  }
+}
+
 function buildMonthRangeStart(monthValue) {
   return monthValue ? `${monthValue}-01T00:00:00` : ''
 }
@@ -61,8 +71,9 @@ const SALE_TYPE_STYLES = {
   Regular:     'bg-gray-100 text-gray-600',
   FilledOffer: 'bg-indigo-100 text-indigo-700',
   Consignment: 'bg-teal-100 text-teal-700',
+  'In Person': 'bg-emerald-100 text-emerald-700',
 }
-const SALE_TYPE_LABELS = { Regular: 'Regular', FilledOffer: 'Offer', Consignment: 'Consignment' }
+const SALE_TYPE_LABELS = { Regular: 'Regular', FilledOffer: 'Offer', Consignment: 'Consignment', 'In Person': 'In Person' }
 const SALES_CSV_COLUMNS = [
   { key: 'order_number', label: 'Order Number' },
   { key: 'shoe_name', label: 'Shoe Name' },
@@ -82,7 +93,7 @@ const SALES_CSV_COLUMNS = [
 
 const ALL_STATUSES = ['Pending','Confirmed','Shipped','Completed','Cancelled','Attention Needed','Consigned','Returned']
 const BUY_PRICE_ONLY_STATUSES = ['Shipped', 'Completed', 'Attention Needed', 'Cancelled']
-const ALL_SALE_TYPES = ['Regular', 'FilledOffer', 'Consignment']
+const ALL_SALE_TYPES = ['Regular', 'FilledOffer', 'Consignment', 'In Person']
 const PER_PAGE = 25
 
 const INPUT = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'
@@ -133,8 +144,11 @@ export default function Sales() {
   const [matchError, setMatchError] = useState(null)
   const [manualOnlyMatchMode, setManualOnlyMatchMode] = useState(false)
   const [availablePurchaseCosts, setAvailablePurchaseCosts] = useState([])
-  const completedProfitPhp = summary?.profit_earnings_usd != null && summary?.profit_purchase_cost_php != null
-    ? (usdToPhp(summary.profit_earnings_usd, phpRate) - Number(summary.profit_purchase_cost_php || 0))
+  const completedEarningsPhpTotal = summary
+    ? ((usdToPhp(summary.completed_earnings_usd, phpRate) || 0) + Number(summary.completed_earnings_php || 0))
+    : null
+  const completedProfitPhp = summary?.profit_purchase_cost_php != null
+    ? (((usdToPhp(summary.profit_earnings_usd, phpRate) || 0) + Number(summary.profit_earnings_php || 0)) - Number(summary.profit_purchase_cost_php || 0))
     : null
 
   useEffect(() => {
@@ -408,7 +422,7 @@ export default function Sales() {
             const estimated = suggestion?.estimated_purchase_cost
             if (estimated != null) setManualPurchaseCost(String(estimated))
           }
-          // costs.length > 1 → leave blank, user picks from selector
+          // costs.length > 1 -> leave blank, user picks from selector
         }
       } catch {
         // Non-blocking
@@ -439,7 +453,7 @@ export default function Sales() {
           const estimated = suggestion?.estimated_purchase_cost
           if (estimated != null) setManualPurchaseCost(current => current || String(estimated))
         }
-        // costs.length > 1 → leave blank, user picks from selector
+        // costs.length > 1 -> leave blank, user picks from selector
       }
     } catch (err) {
       setMatchError(err?.response?.data?.error || 'Failed to load matching inventory.')
@@ -507,7 +521,7 @@ export default function Sales() {
             <KPICard label="Completed Earnings" value={summary.completed_earnings_usd != null ? formatUSD(summary.completed_earnings_usd) : '—'} />
             <KPICard
               label={`Completed Earnings (PHP est. @ ${phpRate || 0})`}
-              value={summary.completed_earnings_usd != null ? formatPHP(usdToPhp(summary.completed_earnings_usd, phpRate)) : '—'}
+              value={completedEarningsPhpTotal != null ? formatPHP(completedEarningsPhpTotal) : '—'}
             />
             <KPICard
               label="Total Profit (PHP est.)"
@@ -540,7 +554,7 @@ export default function Sales() {
             No cost, but matchable
           </label>
           <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 sm:flex-1">
-            Using USD→PHP rate from Settings: {phpRate}
+            Using USD to PHP rate from Settings: {phpRate}
           </div>
           <select value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(1) }}
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 sm:w-auto">
@@ -573,7 +587,7 @@ export default function Sales() {
                     <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Size</th>
                     <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Status</th>
                     <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Amount Made</th>
-                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Amount Made (PHP est.)</th>
+                    <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Amount Made (PHP)</th>
                     <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Purchase Cost (PHP)</th>
                     <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Profit (PHP)</th>
                     <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-gray-400 text-left">Sale Date</th>
@@ -604,13 +618,17 @@ export default function Sales() {
                       </td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.amount_made != null ? formatUSD(sale.amount_made) : '—'}</td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
-                        {usdToPhp(sale.amount_made, phpRate) != null ? formatPHP(usdToPhp(sale.amount_made, phpRate)) : '—'}
+                        {getManualAmountMadePhp(sale) != null
+                          ? formatPHP(getManualAmountMadePhp(sale))
+                          : (usdToPhp(sale.amount_made, phpRate) != null ? formatPHP(usdToPhp(sale.amount_made, phpRate)) : '—')}
                       </td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{sale.purchase_cost != null ? formatPHP(sale.purchase_cost) : '—'}</td>
-                    <td className={`px-4 py-3 whitespace-nowrap ${calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate) < 0 ? 'text-red-500' : 'text-gray-700'}`}>
-                        {calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate) != null
-                          ? formatPHP(calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate))
-                          : '—'}
+                    <td className={`px-4 py-3 whitespace-nowrap ${((getManualAmountMadePhp(sale) != null && sale.purchase_cost != null) ? (Number(getManualAmountMadePhp(sale)) - Number(sale.purchase_cost)) : calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate)) < 0 ? 'text-red-500' : 'text-gray-700'}`}>
+                        {getManualAmountMadePhp(sale) != null && sale.purchase_cost != null
+                          ? formatPHP(Number(getManualAmountMadePhp(sale)) - Number(sale.purchase_cost))
+                          : (calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate) != null
+                            ? formatPHP(calculateProfitPhp(sale.amount_made, sale.purchase_cost, phpRate))
+                            : '—')}
                       </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(sale.sale_date)}</td>
                     <td className="px-4 py-3 text-center text-gray-500">
@@ -860,5 +878,6 @@ export default function Sales() {
     </div>
   )
 }
+
 
 
