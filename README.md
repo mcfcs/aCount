@@ -56,8 +56,9 @@ Sneaker resale accounting and financial management system with a Flask API and a
 
 ## Backend Setup
 
+Run from the repository root:
+
 ```bash
-cd <repo-root>
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -74,8 +75,10 @@ curl http://localhost:5000/health
 
 ## Frontend Setup
 
+From the repository root:
+
 ```bash
-cd <repo-root>/frontend
+cd frontend
 npm ci
 npm run dev
 ```
@@ -86,8 +89,9 @@ Frontend default URL: `http://localhost:5173`
 
 ### Backend
 
+Run from the repository root:
+
 ```bash
-cd <repo-root>
 python run.py
 flask --app run.py init-db
 flask --app run.py drop-db
@@ -96,8 +100,10 @@ python setup_oauth.py
 
 ### Frontend
 
+Run from the repository root:
+
 ```bash
-cd <repo-root>/frontend
+cd frontend
 npm run dev
 npm run lint
 npm run build
