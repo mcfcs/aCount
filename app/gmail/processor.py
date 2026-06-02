@@ -14,7 +14,6 @@ import logging
 from datetime import datetime, date, timedelta
 
 from app import db
-from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from app.models.models import (
     Sale, Inventory, BankTransfer, BankTransferAllocation, Expense, EmailProcessingLog, Shoe,
@@ -56,38 +55,6 @@ def _can_advance_sale_status(current_status: str, next_status: str) -> bool:
     return next_rank > current_rank
 
 
-def _lowest_nonzero_purchase_cost(sku):
-    """
-    Return the smallest non-zero purchase_cost for the same sku
-    across Inventory and Sales. Returns None when no value exists.
-    """
-    if not sku:
-        return None
-
-    inv_min = (
-        db.session.query(func.min(Inventory.purchase_cost))
-        .filter(
-            Inventory.sku == sku,
-            Inventory.purchase_cost.isnot(None),
-            Inventory.purchase_cost > 0,
-        )
-        .scalar()
-    )
-
-    sale_min = (
-        db.session.query(func.min(Sale.purchase_cost))
-        .filter(
-            Sale.sku == sku,
-            Sale.purchase_cost.isnot(None),
-            Sale.purchase_cost > 0,
-        )
-        .scalar()
-    )
-
-    values = [v for v in (inv_min, sale_min) if v is not None]
-    return float(min(values)) if values else None
-
-
 def _set_sale_status_if_advanced(sale: Sale, next_status: str) -> bool:
     """
     Set sale.status only if it's a forward transition.
@@ -118,12 +85,7 @@ def _match_sale_inventory(sale: Sale):
         matched.status = "Sold"
         matched.linked_sale_id = sale.sale_id
         sale.inventory_match_status = "Matched"
-        linked_cost = float(matched.purchase_cost) if matched.purchase_cost else 0
-        if linked_cost <= 0:
-            fallback_cost = _lowest_nonzero_purchase_cost(sale.sku)
-            sale.purchase_cost = fallback_cost if fallback_cost is not None else linked_cost
-        else:
-            sale.purchase_cost = linked_cost
+        sale.purchase_cost = float(matched.purchase_cost) if matched.purchase_cost else None
         logger.info(f"FIFO matched sale #{sale.order_number} -> inventory_id={matched.inventory_id}")
     return matched
 
@@ -310,8 +272,6 @@ def _handle_sale(data: dict, sent_at=None, shoe_image=None):
     if existing_sale:
         if existing_sale.status in MATCH_ELIGIBLE_STATUSES and existing_sale.inventory_match_status != "Matched":
             _match_sale_inventory(existing_sale)
-        if existing_sale.purchase_cost is None:
-            existing_sale.purchase_cost = _lowest_nonzero_purchase_cost(existing_sale.sku)
         db.session.commit()
         logger.info(f"Sale #{order_number} already exists (sale_id={existing_sale.sale_id}).")
         return "Sale", existing_sale.sale_id
@@ -349,8 +309,6 @@ def _handle_sale(data: dict, sent_at=None, shoe_image=None):
             )
             if existing_sale.status in MATCH_ELIGIBLE_STATUSES and existing_sale.inventory_match_status != "Matched":
                 _match_sale_inventory(existing_sale)
-            if existing_sale.purchase_cost is None:
-                existing_sale.purchase_cost = _lowest_nonzero_purchase_cost(existing_sale.sku)
             db.session.commit()
             return "Sale", existing_sale.sale_id
         raise
@@ -367,10 +325,8 @@ def _handle_sale(data: dict, sent_at=None, shoe_image=None):
             matched.status = "Sold"
             matched.linked_sale_id = sale.sale_id
             sale.inventory_match_status = "Matched"
+            sale.purchase_cost = float(matched.purchase_cost) if matched.purchase_cost else None
             logger.info(f"FIFO matched sale #{order_number} → inventory_id={matched.inventory_id}")
-
-    if sale.purchase_cost is None:
-        sale.purchase_cost = _lowest_nonzero_purchase_cost(sale.sku)
 
     # Same-day emails (Sale + Confirmation/Completed) may arrive out of order.
     # If those emails were processed before this Sale was created, back-fill them now.

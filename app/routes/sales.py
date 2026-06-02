@@ -319,15 +319,7 @@ def _match_sale_inventory(sale):
     if matched_item:
         matched_item.status = "Sold"
         matched_item.linked_sale_id = sale.sale_id
-        item_cost = float(matched_item.purchase_cost) if matched_item.purchase_cost else 0
-        if item_cost > 0:
-            sale.purchase_cost = item_cost
-        else:
-            fallback_cost = _lowest_nonzero_purchase_cost(sale.sku, exclude_sale_id=sale.sale_id, exclude_inventory_id=matched_item.inventory_id)
-            if fallback_cost is not None:
-                sale.purchase_cost = fallback_cost
-            else:
-                sale.purchase_cost = item_cost
+        sale.purchase_cost = float(matched_item.purchase_cost) if matched_item.purchase_cost else None
         sale.inventory_match_status = "Matched"
     return matched_item
 
@@ -444,10 +436,6 @@ def create_sale():
     # --- FIFO inventory match (Spec 2.2.3) ---
     _match_sale_inventory(sale)
 
-    # --- Smart pricing fallback from historical non-zero costs ---
-    if sale.purchase_cost is None:
-        sale.purchase_cost = _lowest_nonzero_purchase_cost(sale.sku, exclude_sale_id=sale.sale_id)
-
     db.session.commit()
 
     return jsonify(sale.to_dict()), 201
@@ -474,10 +462,6 @@ def update_sale(sale_id):
     # Re-attempt matching only when status is updated into an active match state.
     if "status" in parsed and parsed["status"] in MATCH_ELIGIBLE_STATUSES:
         _match_sale_inventory(sale)
-
-    # Smart pricing fallback from historical non-zero costs.
-    if sale.purchase_cost is None:
-        sale.purchase_cost = _lowest_nonzero_purchase_cost(sale.sku, exclude_sale_id=sale.sale_id)
 
     db.session.commit()
     return jsonify(sale.to_dict()), 200

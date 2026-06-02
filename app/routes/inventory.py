@@ -13,42 +13,6 @@ from sqlalchemy import func
 inventory_bp = Blueprint("inventory", __name__)
 
 
-def _lowest_nonzero_purchase_cost(sku, exclude_sale_id=None, exclude_inventory_id=None):
-    """
-    Return the smallest non-zero purchase_cost across Inventory and Sales for the
-    same sku.
-    """
-    if not sku:
-        return None
-
-    inv_query = (
-        db.session.query(func.min(Inventory.purchase_cost))
-        .filter(
-            Inventory.sku == sku,
-            Inventory.purchase_cost.isnot(None),
-            Inventory.purchase_cost > 0,
-        )
-    )
-    if exclude_inventory_id is not None:
-        inv_query = inv_query.filter(Inventory.inventory_id != exclude_inventory_id)
-    inv_min = inv_query.scalar()
-
-    sale_query = (
-        db.session.query(func.min(Sale.purchase_cost))
-        .filter(
-            Sale.sku == sku,
-            Sale.purchase_cost.isnot(None),
-            Sale.purchase_cost > 0,
-        )
-    )
-    if exclude_sale_id is not None:
-        sale_query = sale_query.filter(Sale.sale_id != exclude_sale_id)
-    sale_min = sale_query.scalar()
-
-    values = [v for v in (inv_min, sale_min) if v is not None]
-    return float(min(values)) if values else None
-
-
 # ---- Validation helpers ---------------------------------------------------
 
 VALID_STATUSES = ("Available", "Sold", "Consigned")
@@ -411,12 +375,7 @@ def link_inventory_to_sale(inventory_id, sale_id):
 
     item.status = "Sold"
     item.linked_sale_id = sale.sale_id
-    linked_cost = float(item.purchase_cost) if item.purchase_cost else 0
-    if linked_cost <= 0:
-            fallback_cost = _lowest_nonzero_purchase_cost(item.sku, exclude_sale_id=sale.sale_id, exclude_inventory_id=item.inventory_id)
-            sale.purchase_cost = fallback_cost if fallback_cost is not None else linked_cost
-    else:
-        sale.purchase_cost = linked_cost
+    sale.purchase_cost = float(item.purchase_cost) if item.purchase_cost else None
     sale.inventory_match_status = "Matched"
 
     db.session.commit()
