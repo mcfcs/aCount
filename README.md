@@ -4,11 +4,11 @@ Sneaker resale accounting and financial management system with a Flask API and a
 
 ## Repository Structure
 
-- `/tmp/workspace/mcfcs/aCount/app` — Flask application, database models, API routes, and Gmail processing logic
-- `/tmp/workspace/mcfcs/aCount/frontend` — React + Vite UI
-- `/tmp/workspace/mcfcs/aCount/migrations` — Alembic migrations
-- `/tmp/workspace/mcfcs/aCount/run.py` — backend entry point and CLI helpers
-- `/tmp/workspace/mcfcs/aCount/setup_oauth.py` — one-time Gmail OAuth refresh-token setup script
+- `app/` — Flask application, database models, API routes, and Gmail processing logic
+- `frontend/` — React + Vite UI
+- `migrations/` — Alembic migrations
+- `run.py` — backend entry point and CLI helpers
+- `setup_oauth.py` — one-time Gmail OAuth refresh-token setup script
 
 ## Core Capabilities
 
@@ -45,7 +45,7 @@ Sneaker resale accounting and financial management system with a Flask API and a
 
 ## Environment Setup
 
-1. Copy `/tmp/workspace/mcfcs/aCount/.env.example` to `/tmp/workspace/mcfcs/aCount/.env`.
+1. Copy `.env.example` to `.env`.
 2. Fill required values such as:
    - `DATABASE_URL`
    - `SECRET_KEY`
@@ -57,7 +57,7 @@ Sneaker resale accounting and financial management system with a Flask API and a
 ## Backend Setup
 
 ```bash
-cd /tmp/workspace/mcfcs/aCount
+cd <repo-root>
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -75,7 +75,7 @@ curl http://localhost:5000/health
 ## Frontend Setup
 
 ```bash
-cd /tmp/workspace/mcfcs/aCount/frontend
+cd <repo-root>/frontend
 npm ci
 npm run dev
 ```
@@ -87,7 +87,7 @@ Frontend default URL: `http://localhost:5173`
 ### Backend
 
 ```bash
-cd /tmp/workspace/mcfcs/aCount
+cd <repo-root>
 python run.py
 flask --app run.py init-db
 flask --app run.py drop-db
@@ -97,7 +97,7 @@ python setup_oauth.py
 ### Frontend
 
 ```bash
-cd /tmp/workspace/mcfcs/aCount/frontend
+cd <repo-root>/frontend
 npm run dev
 npm run lint
 npm run build
