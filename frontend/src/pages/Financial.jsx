@@ -658,7 +658,7 @@ export default function Financial() {
         <div className="flex overflow-x-auto border-b border-gray-200">
           {TABS.map((tab, idx) => (
             <button key={tab} onClick={() => setActiveTab(idx)}
-               className={`whitespace-nowrap px-5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+               className={`-mb-px whitespace-nowrap border-b-2 px-5 py-3 text-sm font-semibold uppercase tracking-wide transition-colors ${
                 activeTab === idx ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}>
               {tab}

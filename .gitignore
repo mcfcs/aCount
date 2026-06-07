@@ -42,3 +42,4 @@ htmlcov/
 *.whl
 .claude/settings.json
 /app/uploads
+app/gmail/.poll_state.json

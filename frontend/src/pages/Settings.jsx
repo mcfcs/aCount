@@ -9,7 +9,7 @@ const FIELD = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:
 function Card({ title, children }) {
   return (
     <section className="rounded-xl border border-gray-100 bg-white p-5 shadow-sm">
-      <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
+      <h2 className="font-display text-xl uppercase tracking-wide text-gray-900">{title}</h2>
       <div className="mt-4 space-y-4">{children}</div>
     </section>
   )

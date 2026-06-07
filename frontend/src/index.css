@@ -1,13 +1,316 @@
 @import "tailwindcss";
 
-body {
-  margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+/* ════════════════════════════════════════════════════════════════════════
+   aCount — "Streetwear Ledger"
+   Dark, high-contrast sneaker-drop accounting. Volt-on-black.
+
+   Strategy: the app is built on Tailwind utility classes (bg-white, bg-gray-*,
+   text-gray-*, indigo-* for the accent, plus status hues). Rather than rewrite
+   every page, we re-map the design tokens those utilities resolve through.
+   The neutral ramp is inverted into a dark "ink" scale and the indigo ramp is
+   replaced with VOLT, so the entire app flips to the new aesthetic at once.
+   The shared chrome (sidebar, top bar, KPI cards, modals) is then rebuilt by
+   hand for the bold display typography and grid-breaking moments.
+   ════════════════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* ─── Typography ─────────────────────────────────────────────────────── */
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-display: "Anton", "Hanken Grotesk", sans-serif;
+
+  /* ─── Neutral "ink" scale — inverted into a dark ledger palette ────────
+     Every bg-white / bg-gray-* / text-gray-* / border-gray-* utility in the
+     codebase resolves through these. Low numbers = dark surfaces & hairlines,
+     high numbers = bright text — the reverse of the default light ramp. */
+  --color-white:    #141417;  /* card / panel surface (bg-white, and text-white = dark ink on accents) */
+  --color-gray-50:  #0a0a0b;  /* app canvas — darkest */
+  --color-gray-100: #232329;  /* hairline borders + row dividers */
+  --color-gray-200: #2e2e35;  /* input borders */
+  --color-gray-300: #3a3a43;  /* dashed / stronger borders */
+  --color-gray-400: #71717e;  /* muted text, table-head labels, placeholders */
+  --color-gray-500: #8c8c99;  /* secondary text */
+  --color-gray-600: #aaaab6;  /* labels / body */
+  --color-gray-700: #c8c8d1;  /* strong body / table values */
+  --color-gray-800: #e0e0e6;  /* near-heading */
+  --color-gray-900: #f3f3f5;  /* headings / strongest text */
+  --color-gray-950: #fbfbfc;
+
+  /* ─── Accent: VOLT (acid green) ────────────────────────────────────────
+     Mapped over the indigo ramp the app uses for primary buttons, active nav,
+     focus rings, links and accent chips. text-white (=dark ink) sits on top. */
+  --color-indigo-50:  #1a2207;
+  --color-indigo-100: #283410;
+  --color-indigo-200: #3d4d15;
+  --color-indigo-300: #5f7a1e;
+  --color-indigo-400: #aee03a;  /* focus ring / focus border */
+  --color-indigo-500: #c6f23f;
+  --color-indigo-600: #d4ff3f;  /* PRIMARY volt */
+  --color-indigo-700: #c4ef2a;  /* hover / accent-chip text */
+  --color-indigo-800: #b6e021;
+  --color-indigo-900: #95bb1e;
+
+  /* ─── Positive / profit — mint emerald (distinct from the volt accent) ── */
+  --color-emerald-50:  #06231a;
+  --color-emerald-100: #0a3326;
+  --color-emerald-200: #114633;
+  --color-emerald-300: #1c6b4f;
+  --color-emerald-500: #2ee0a0;
+  --color-emerald-600: #2ee0a0;
+  --color-emerald-700: #6ff0c4;
+  --color-green-50:  #06231a;
+  --color-green-100: #0a3326;
+  --color-green-200: #114633;
+  --color-green-500: #2ee0a0;
+  --color-green-600: #2ee0a0;
+  --color-green-700: #6ff0c4;
+
+  /* ─── Negative / loss / destructive — hot red ──────────────────────────── */
+  --color-red-50:  #2a0c0c;
+  --color-red-100: #3b1414;
+  --color-red-200: #4f1c1c;
+  --color-red-300: #6e2727;
+  --color-red-500: #ff5b5b;
+  --color-red-600: #ff5b5b;
+  --color-red-700: #ff8c8c;
+
+  /* ─── Warm signals (attention / urgency / consigned) ───────────────────── */
+  --color-orange-50:  #2a1505;
+  --color-orange-100: #3a1d08;
+  --color-orange-200: #4f2810;
+  --color-orange-500: #ff9d3f;
+  --color-orange-600: #ff9d3f;
+  --color-orange-700: #ffbe78;
+  --color-amber-50:  #2a1d05;
+  --color-amber-100: #3a2808;
+  --color-amber-200: #4f3510;
+  --color-amber-500: #f5b73f;
+  --color-amber-600: #f5b73f;
+  --color-amber-700: #fbcf6c;
+  --color-amber-800: #fcdd97;
+  --color-amber-900: #fde9bb;
+  --color-yellow-50:  #2a2305;
+  --color-yellow-100: #393009;
+  --color-yellow-200: #4f4110;
+  --color-yellow-500: #facc15;
+  --color-yellow-600: #f5cd2a;
+  --color-yellow-700: #fde047;
+
+  /* ─── Cool signals (confirmed / shipped / info) ────────────────────────── */
+  --color-blue-50:  #0a1a2e;
+  --color-blue-100: #0e2540;
+  --color-blue-200: #163150;
+  --color-blue-500: #4d94ff;
+  --color-blue-600: #5fa0ff;
+  --color-blue-700: #93c1ff;
+  --color-purple-50:  #1e0a2e;
+  --color-purple-100: #2a1140;
+  --color-purple-200: #381a52;
+  --color-purple-500: #b06bff;
+  --color-purple-600: #b06bff;
+  --color-purple-700: #d3b0ff;
+  --color-violet-500: #b06bff;
+  --color-teal-50:  #06231f;
+  --color-teal-100: #0a322c;
+  --color-teal-200: #11423a;
+  --color-teal-500: #2fd4c4;
+  --color-teal-600: #2fd4c4;
+  --color-teal-700: #5eeadd;
+  --color-cyan-500: #2fd4d4;
+  --color-slate-50:  #0e1116;
+  --color-slate-100: #1b212a;
+  --color-slate-200: #28303b;
+  --color-slate-500: #8a98ab;
+  --color-slate-600: #9aa7b8;
+
+  /* ─── Brand tokens for the hand-built chrome ───────────────────────────── */
+  --color-volt:       #d4ff3f;
+  --color-volt-dim:   #aee03a;
+  --color-canvas:     #0a0a0b;
+  --color-surface:    #141417;
+  --color-surface-2:  #1b1b20;
+  --color-hairline:   #26262d;
 }
 
-#root {
-  width: 100%;
-  min-height: 100vh;
+/* ════════════════════════════════════════════════════════════════════════
+   Base layer — atmosphere, typography defaults, focus, scrollbars
+   ════════════════════════════════════════════════════════════════════════ */
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background-color: #0a0a0b;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: #0a0a0b;
+    color: #f3f3f5;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Two faint accent auras bleed in from the corners for depth. */
+    background-image:
+      radial-gradient(55rem 55rem at 6% -12%, rgba(212, 255, 63, 0.08), transparent 60%),
+      radial-gradient(48rem 48rem at 112% -4%, rgba(95, 160, 255, 0.05), transparent 55%);
+    background-attachment: fixed;
+  }
+
+  /* Fine technical grid — fades out toward the bottom so content stays clean. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.016) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px);
+    background-size: 58px 58px;
+    -webkit-mask-image: radial-gradient(130% 110% at 50% -10%, #000 28%, transparent 88%);
+    mask-image: radial-gradient(130% 110% at 50% -10%, #000 28%, transparent 88%);
+  }
+
+  /* Film grain overlay for texture. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.035;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 200px 200px;
+  }
+
+  #root {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background: #d4ff3f;
+    color: #0a0a0b;
+  }
+
+  /* Monospace numerals everywhere they appear should align like a ledger. */
+  .font-mono,
+  code,
+  kbd {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
+  }
+
+  /* Form controls inherit the dark surface so unstyled inputs still read as fields. */
+  input,
+  select,
+  textarea {
+    color-scheme: dark;
+    background-color: var(--color-white);
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: #6a6a76;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(212, 255, 63, 0.7);
+    outline-offset: 2px;
+  }
+
+  /* Scrollbars — slim, dark, with a volt-on-hover thumb. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #34343d transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2e2e35;
+    border-radius: 999px;
+    border: 2px solid #0a0a0b;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #4a4a55;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Reusable aesthetic primitives for the hand-built chrome
+   ════════════════════════════════════════════════════════════════════════ */
+@layer components {
+  /* Condensed poster display face — page titles, KPI labels, section heads. */
+  .font-display {
+    font-family: var(--font-display);
+    font-weight: 400;
+    letter-spacing: 0.015em;
+  }
+
+  /* Tiny mono "kicker" labels — the ledger's connective tissue. */
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #71717e;
+  }
+
+  /* Surface card with a hairline + faint inner top light. */
+  .ledger-card {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 32%), var(--color-surface);
+    border: 1px solid var(--color-hairline);
+    border-radius: 1rem;
+  }
+
+  /* Volt glow used on primary actions and the hero figure. */
+  .volt-glow {
+    box-shadow: 0 0 0 1px rgba(212, 255, 63, 0.25), 0 8px 30px -8px rgba(212, 255, 63, 0.35);
+  }
+
+  /* Scanline texture for the hero panel. */
+  .scanlines {
+    background-image: repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.025) 0px,
+      rgba(255, 255, 255, 0.025) 1px,
+      transparent 1px,
+      transparent 4px
+    );
+  }
+}
+
+@layer utilities {
+  @keyframes ledger-rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .animate-rise {
+    animation: ledger-rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes volt-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  .animate-volt-pulse {
+    animation: volt-pulse 1.8s ease-in-out infinite;
+  }
 }

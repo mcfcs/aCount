@@ -1149,7 +1149,7 @@ export default function Inventory() {
             </>
           ) : (
             <div className="col-span-full rounded-xl border border-gray-100 bg-white p-5 h-80">
-              <h2 className="mb-3 text-sm font-semibold text-gray-700">Shoes by Brand</h2>
+              <h2 className="mb-3 font-display text-base uppercase tracking-wide text-gray-700">Shoes by Brand</h2>
               {shoeBrandData.length === 0 ? (
                 <EmptyState title="No shoes" message="No shoes match this filter yet." />
               ) : (
