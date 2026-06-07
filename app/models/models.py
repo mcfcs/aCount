@@ -250,6 +250,10 @@ class BankTransfer(db.Model):
 
 class BankTransferAllocation(db.Model):
     __tablename__ = "bank_transfer_allocations"
+    __table_args__ = (
+        # Reconciliation anti-joins filter allocations by sale_id.
+        db.Index("ix_bta_sale_id", "sale_id"),
+    )
 
     allocation_id    = db.Column(db.Integer, primary_key=True, autoincrement=True)
     transfer_id      = db.Column(db.Integer, db.ForeignKey("bank_transfers.transfer_id", ondelete="CASCADE"), nullable=False)
@@ -273,6 +277,10 @@ class BankTransferAllocation(db.Model):
 
 class Expense(db.Model):
     __tablename__ = "expenses"
+    __table_args__ = (
+        # Expenses are frequently looked up / nulled by their linked sale.
+        db.Index("ix_expense_linked_sale", "linked_sale_id"),
+    )
 
     expense_id        = db.Column(db.Integer, primary_key=True, autoincrement=True)
     category          = db.Column(db.String(30), nullable=False)
@@ -354,6 +362,10 @@ class Subscription(db.Model):
 
 class EmailProcessingLog(db.Model):
     __tablename__ = "email_processing_log"
+    __table_args__ = (
+        # Speeds up the deferred confirmation/completion lookups in the Gmail pipeline.
+        db.Index("ix_email_log_type_linked", "email_type", "linked_record_id"),
+    )
 
     log_id             = db.Column(db.Integer, primary_key=True, autoincrement=True)
     gmail_message_id   = db.Column(db.String(255), nullable=False, unique=True)

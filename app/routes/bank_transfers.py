@@ -83,7 +83,8 @@ def list_transfers():
 
     sort_by = request.args.get("sort_by", "transfer_date")
     order = request.args.get("order", "desc")
-    sort_col = getattr(BankTransfer, sort_by, BankTransfer.transfer_date)
+    _valid_sort = {c.key for c in BankTransfer.__table__.columns}
+    sort_col = getattr(BankTransfer, sort_by) if sort_by in _valid_sort else BankTransfer.transfer_date
     if order == "asc":
         query = query.order_by(sort_col.asc())
     else:

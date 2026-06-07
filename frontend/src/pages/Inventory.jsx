@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback } from 'react'
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import TopBar from '../components/layout/TopBar'
 import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
@@ -7,6 +7,7 @@ import Modal from '../components/common/Modal'
 import ImageDropInput from '../components/common/ImageDropInput'
 import { exportToCsv } from '../utils/csv'
 import { exportSellingWorkbook } from '../utils/excel'
+import { useDebounce } from '../utils/useDebounce'
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import {
   getInventory,
@@ -126,7 +127,12 @@ function isOldItem(dateStr) {
 }
 function toDatetimeLocal(iso) {
   if (!iso) return ''
-  try { return new Date(iso).toISOString().slice(0, 16) } catch { return '' }
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    // Offset to local wall-clock so the datetime-local input doesn't shift by the timezone.
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  } catch { return '' }
 }
 
 const STATUS_STYLES = {
@@ -299,6 +305,9 @@ export default function Inventory() {
   const [markSoldSaving, setMarkSoldSaving] = useState(false)
   const [markSoldError, setMarkSoldError] = useState(null)
 
+  const debouncedSearch = useDebounce(searchQuery)
+  const fetchReqId = useRef(0)
+
   const refreshQuickSizeOptions = useCallback(async () => {
     const allRows = []
     let pageNum = 1
@@ -330,6 +339,7 @@ export default function Inventory() {
   }, [])
 
   const fetchData = useCallback(async () => {
+    const reqId = ++fetchReqId.current
     setLoading(true)
     setError(null)
 
@@ -337,7 +347,7 @@ export default function Inventory() {
       const perPage = 100
       const allRows = []
       let pageNum = 1
-      const q = searchQuery.trim()
+      const q = debouncedSearch.trim()
       const shouldFetchAll = Boolean(q)
       if (!forceAllPages && !shouldFetchAll) {
         const firstData = await requestFn({ ...baseParams, page: pageNum, per_page: 200 })
@@ -368,14 +378,15 @@ export default function Inventory() {
           order: 'asc',
         }
         if (shoeBrandFilter) params.brand = shoeBrandFilter
-        const q = searchQuery.trim()
+        const q = debouncedSearch.trim()
         if (q) params.q = q
         const rows = await fetchAllPages((requestParams) => getShoes(requestParams), params)
+        if (reqId !== fetchReqId.current) return
         setShoes(rows)
       } catch (err) {
         setError(err?.response?.data?.error || 'Failed to load shoes')
       } finally {
-        setLoading(false)
+        if (reqId === fetchReqId.current) setLoading(false)
       }
       return
     }
@@ -386,14 +397,15 @@ export default function Inventory() {
         if (statusFilter) params.status = statusFilter
         if (sizeFilter !== '') params.size = sizeFilter
         if (sizeTypeFilter) params.size_type = sizeTypeFilter
-        const q = searchQuery.trim()
+        const q = debouncedSearch.trim()
         if (q) params.q = q
         const rows = await fetchAllPages((requestParams) => getInventory(requestParams), params, { forceAllPages: true })
+        if (reqId !== fetchReqId.current) return
         setSellingItems(Array.isArray(rows) ? rows : [])
       } catch (err) {
         setError(err?.response?.data?.error || 'Failed to load selling inventory')
       } finally {
-        setLoading(false)
+        if (reqId === fetchReqId.current) setLoading(false)
       }
       return
     }
@@ -403,7 +415,7 @@ export default function Inventory() {
       if (statusFilter) params.status = statusFilter
       if (sizeFilter !== '') params.size = sizeFilter
       if (sizeTypeFilter) params.size_type = sizeTypeFilter
-      const q = searchQuery.trim()
+      const q = debouncedSearch.trim()
       if (q) params.q = q
 
       const shouldApplyQuickSizeAcrossInventory = selectedSizeFilters.length > 0
@@ -412,6 +424,7 @@ export default function Inventory() {
           fetchAllPages((requestParams) => getInventory(requestParams), params, { forceAllPages: true }),
           getInventorySummary(params),
         ])
+        if (reqId !== fetchReqId.current) return
         const filteredRows = filterItemsBySelectedSizes(Array.isArray(allInventoryRows) ? allInventoryRows : [], selectedSizeFilters, {
           sizeMode: quickSizeMode,
           includeWomenSizes,
@@ -440,6 +453,7 @@ export default function Inventory() {
           getInventory({ ...params, page: inventoryPage, per_page: INVENTORY_PER_PAGE }),
           getInventorySummary(params),
         ])
+        if (reqId !== fetchReqId.current) return
         const rows = Array.isArray(inventoryData) ? inventoryData : inventoryData.inventory || inventoryData.items || []
         setItems(Array.isArray(rows) ? rows : [])
         setInventoryVisibleTotal(Array.isArray(rows) ? rows.length : 0)
@@ -458,13 +472,13 @@ export default function Inventory() {
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, searchQuery, inventoryPage, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, debouncedSearch, inventoryPage, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
 
   useEffect(() => { fetchData() }, [fetchData])
 
   useEffect(() => {
     setInventoryPage(1)
-  }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery, activeView, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
+  }, [statusFilter, sizeFilter, sizeTypeFilter, debouncedSearch, activeView, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
 
   useEffect(() => {
     setSelectedSizeFilters([])
@@ -488,7 +502,7 @@ export default function Inventory() {
     return () => URL.revokeObjectURL(previewUrl)
   }, [shoeImageFile])
 
-  const shoeBrandData = Object.entries(
+  const shoeBrandData = useMemo(() => Object.entries(
     shoes.reduce((acc, item) => {
       const brand = item.brand || 'Other'
       acc[brand] = (acc[brand] || 0) + 1
@@ -497,7 +511,7 @@ export default function Inventory() {
   ).map(([brand, count]) => ({
     name: brand,
     value: count,
-  }))
+  })), [shoes])
 
   const fetchAllInventoryForExport = useCallback(async () => {
     let pageNum = 1
@@ -526,16 +540,28 @@ export default function Inventory() {
     return filterItemsBySelectedSizes(allItems, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
   }, [statusFilter, sizeFilter, sizeTypeFilter, searchQuery, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
 
-  const inventoryRows = filterItemsBySelectedSizes(items, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
-  const sellingRows = filterItemsBySelectedSizes(sellingItems, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+  const inventoryRows = useMemo(
+    () => filterItemsBySelectedSizes(items, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode }),
+    [items, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode],
+  )
+  const sellingRows = useMemo(
+    () => filterItemsBySelectedSizes(sellingItems, selectedSizeFilters, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode }),
+    [sellingItems, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode],
+  )
   const sellingRowIdsKey = sellingRows.map((item) => item.inventory_id).join('|')
-  const fallbackQuickSizeOptions = collectQuickSizeOptions([
-    ...items.filter((item) => item?.status === 'Available'),
-    ...sellingItems.filter((item) => item?.status === 'Available'),
-  ], { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
-  const visibleQuickSizeOptions = (quickSizeRows.length
-    ? collectQuickSizeOptions(quickSizeRows, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
-    : fallbackQuickSizeOptions)
+  const fallbackQuickSizeOptions = useMemo(
+    () => collectQuickSizeOptions([
+      ...items.filter((item) => item?.status === 'Available'),
+      ...sellingItems.filter((item) => item?.status === 'Available'),
+    ], { sizeMode: quickSizeMode, includeWomenSizes, psTdMode }),
+    [items, sellingItems, quickSizeMode, includeWomenSizes, psTdMode],
+  )
+  const visibleQuickSizeOptions = useMemo(
+    () => (quickSizeRows.length
+      ? collectQuickSizeOptions(quickSizeRows, { sizeMode: quickSizeMode, includeWomenSizes, psTdMode })
+      : fallbackQuickSizeOptions),
+    [quickSizeRows, fallbackQuickSizeOptions, quickSizeMode, includeWomenSizes, psTdMode],
+  )
   const totalValue = inventorySummary?.active_value_php || 0
   const hasInventoryTags = inventoryRows.some((item) => parseInventoryTags(item.notes).length > 0)
   const sellingHasInventoryTags = sellingRows.some((item) => parseInventoryTags(item.notes).length > 0)

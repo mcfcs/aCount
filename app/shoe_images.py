@@ -7,6 +7,8 @@ from uuid import uuid4
 from flask import current_app
 from werkzeug.utils import secure_filename
 
+from app.utils import assert_safe_public_url
+
 
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
 CONTENT_TYPE_EXTENSION_MAP = {
@@ -93,9 +95,8 @@ def save_shoe_image_from_url(url: str) -> str:
         raise ValueError("Image URL is required.")
 
     candidate_url = _extract_google_proxy_original_url(str(url).strip())
-    parsed = urlparse(candidate_url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("Image URL must start with http:// or https://.")
+    # Validates scheme AND blocks internal/SSRF targets (localhost, RFC1918, metadata IP).
+    parsed = assert_safe_public_url(candidate_url)
 
     request = urllib.request.Request(candidate_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=20) as response:

@@ -31,17 +31,25 @@ function CustomTooltip({ active, payload }) {
   return null
 }
 
-export default function SalesByStatus({ sales = [], loading = false, error = null }) {
+export default function SalesByStatus({ sales = [], statusCounts = null, loading = false, error = null }) {
   if (loading) return <LoadingSpinner className="py-8" />
   if (error) return <p className="py-4 text-sm text-red-500">{error}</p>
 
-  // Aggregate by status
-  const counts = {}
-  for (const sale of sales) {
-    const status = sale.status || 'Unknown'
-    counts[status] = (counts[status] || 0) + 1
+  // Prefer a pre-aggregated { status: count } map (cheaper than shipping rows);
+  // fall back to counting a raw sales array when only that is provided.
+  let data
+  if (statusCounts && typeof statusCounts === 'object') {
+    data = Object.entries(statusCounts)
+      .map(([name, value]) => ({ name, value: Number(value) || 0 }))
+      .filter((d) => d.value > 0)
+  } else {
+    const counts = {}
+    for (const sale of sales) {
+      const status = sale.status || 'Unknown'
+      counts[status] = (counts[status] || 0) + 1
+    }
+    data = Object.entries(counts).map(([name, value]) => ({ name, value }))
   }
-  const data = Object.entries(counts).map(([name, value]) => ({ name, value }))
 
   if (!data.length) return <EmptyState title="No sales data" message="Sales will appear here once recorded." />
 

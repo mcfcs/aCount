@@ -17,7 +17,7 @@
   /* ─── Typography ─────────────────────────────────────────────────────── */
   --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
-  --font-display: "Anton", "Hanken Grotesk", sans-serif;
+  --font-display: "Bricolage Grotesque", "Hanken Grotesk", sans-serif;
 
   /* ─── Neutral "ink" scale — inverted into a dark ledger palette ────────
      Every bg-white / bg-gray-* / text-gray-* / border-gray-* utility in the
@@ -251,11 +251,11 @@
    Reusable aesthetic primitives for the hand-built chrome
    ════════════════════════════════════════════════════════════════════════ */
 @layer components {
-  /* Condensed poster display face — page titles, KPI labels, section heads. */
+  /* Heavy display grotesque — page titles, KPI labels, section heads. */
   .font-display {
     font-family: var(--font-display);
-    font-weight: 400;
-    letter-spacing: 0.015em;
+    font-weight: 800;
+    letter-spacing: -0.01em;
   }
 
   /* Tiny mono "kicker" labels — the ledger's connective tissue. */

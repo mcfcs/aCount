@@ -40,7 +40,8 @@ def list_logs():
 
     sort_by = request.args.get("sort_by", "processed_at")
     order = request.args.get("order", "desc")
-    sort_col = getattr(EmailProcessingLog, sort_by, EmailProcessingLog.processed_at)
+    _valid_sort = {c.key for c in EmailProcessingLog.__table__.columns}
+    sort_col = getattr(EmailProcessingLog, sort_by) if sort_by in _valid_sort else EmailProcessingLog.processed_at
     if order == "asc":
         query = query.order_by(sort_col.asc())
     else:

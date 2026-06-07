@@ -6,7 +6,7 @@ import ActionItems from '../components/dashboard/ActionItems'
 import RecentActivity from '../components/dashboard/RecentActivity'
 import SalesByStatus from '../components/dashboard/SalesByStatus'
 import ProfitOverTime from '../components/dashboard/ProfitOverTime'
-import { getDashboardSummary, getDashboardAlerts, getSales, getEmailLog } from '../services/api'
+import { getDashboardSummary, getDashboardAlerts, getSalesSummary, getEmailLog } from '../services/api'
 import { usePhpEstimateRate, formatPhpRate } from '../utils/exchangeRate'
 
 function formatPHP(value) {
@@ -42,7 +42,7 @@ function Panel({ index, title, action, children, className = '' }) {
 export default function Dashboard() {
   const [summary, setSummary] = useState(null)
   const [alerts, setAlerts] = useState([])
-  const [sales, setSales] = useState([])
+  const [statusCounts, setStatusCounts] = useState(null)
   const [emailLog, setEmailLog] = useState([])
   const [loading, setLoading] = useState(true)
   const [summaryError, setSummaryError] = useState(null)
@@ -67,9 +67,9 @@ export default function Dashboard() {
           err?.response?.data?.error || err?.response?.data?.message || 'Failed to load alerts'
         )),
 
-      getSales({ per_page: 200 })
-        .then(data => setSales(Array.isArray(data) ? data : data.sales || data.items || []))
-        .catch(() => setSales([])),
+      getSalesSummary()
+        .then(data => setStatusCounts(data?.by_status || {}))
+        .catch(() => setStatusCounts({})),
 
       getEmailLog({ per_page: 15 })
         .then(data => setEmailLog(Array.isArray(data) ? data : data.logs || data.items || []))
@@ -178,7 +178,7 @@ export default function Dashboard() {
         {/* ── CHARTS + ALERTS ──────────────────────────────────────────── */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           <Panel index="01" title="Sales by Status">
-            <SalesByStatus sales={sales} loading={loading} />
+            <SalesByStatus statusCounts={statusCounts} loading={loading} />
           </Panel>
           <Panel index="02" title="Action Items">
             <ActionItems alerts={alerts} loading={loading} error={alertsError} />

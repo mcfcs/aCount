@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import TopBar from '../components/layout/TopBar'
 import KPICard from '../components/common/KPICard'
 import LoadingSpinner from '../components/common/LoadingSpinner'
@@ -6,6 +6,7 @@ import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
 import ImageDropInput from '../components/common/ImageDropInput'
 import { exportToCsv } from '../utils/csv'
+import { useDebounce } from '../utils/useDebounce'
 import { getSales, getSalesSummary, getInventory, getPricingSuggestion, createSale, updateSale, deleteSale, linkInventoryToSale, unmatchSale, getPurchaseCosts, getShoeBySku, ensureShoe, ensureShoeWithImage } from '../services/api'
 import { usePhpEstimateRate, usdToPhp } from '../utils/exchangeRate'
 
@@ -35,6 +36,25 @@ function getManualAmountMadePhp(sale) {
   }
 }
 
+function parseSaleNotes(notes) {
+  // Sale notes double as a JSON envelope for structured data (e.g. in-person
+  // amount_made_php). Separate that from the human-readable text so editing the
+  // free-text field never clobbers the structured keys.
+  try {
+    const parsed = JSON.parse(notes || '')
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const { text, ...structured } = parsed
+      return {
+        structured: Object.keys(structured).length ? structured : null,
+        text: typeof text === 'string' ? text : '',
+      }
+    }
+  } catch {
+    /* plain text — fall through */
+  }
+  return { structured: null, text: notes || '' }
+}
+
 function buildMonthRangeStart(monthValue) {
   return monthValue ? `${monthValue}-01T00:00:00` : ''
 }
@@ -53,7 +73,12 @@ function formatDate(dateStr) {
 }
 function toDatetimeLocal(iso) {
   if (!iso) return ''
-  try { return new Date(iso).toISOString().slice(0, 16) } catch { return '' }
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    // Offset to local wall-clock so the datetime-local input doesn't shift by the timezone.
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  } catch { return '' }
 }
 
 
@@ -125,10 +150,15 @@ export default function Sales() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const phpRate = usePhpEstimateRate()
+  const debouncedSearch = useDebounce(searchQuery)
+  const debouncedSku = useDebounce(skuSearch)
+  const debouncedOrder = useDebounce(orderSearch)
+  const fetchReqId = useRef(0)
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(EMPTY_SALE)
+  const [notesMeta, setNotesMeta] = useState(null)  // structured (non-text) notes keys to preserve
   const [shoeImageInfo, setShoeImageInfo] = useState(null)
   const [shoeImageFile, setShoeImageFile] = useState(null)
   const [shoeImageUrl, setShoeImageUrl] = useState('')
@@ -159,16 +189,17 @@ export default function Sales() {
   }, [shoeImageFile])
 
   const fetchData = useCallback(async () => {
+    const reqId = ++fetchReqId.current
     setLoading(true)
     setError(null)
     try {
       const params = { page, per_page: PER_PAGE }
       if (statusFilter) params.status = statusFilter
-      const q = searchQuery.trim()
+      const q = debouncedSearch.trim()
       if (q) params.shoe_name = q
-      const oq = orderSearch.trim()
+      const oq = debouncedOrder.trim()
       if (oq) params.order_number = oq
-      const sq = skuSearch.trim()
+      const sq = debouncedSku.trim()
       if (sq) params.sku = sq
       if (saleMonth) {
         params.date_from = buildMonthRangeStart(saleMonth)
@@ -176,23 +207,27 @@ export default function Sales() {
       }
       if (matchableFilter) params.matchable = '1'
       const [salesData, summaryData] = await Promise.all([getSales(params), getSalesSummary(params)])
+      if (reqId !== fetchReqId.current) return  // a newer request superseded this one
       const items = Array.isArray(salesData) ? salesData : salesData.sales || salesData.items || []
-      const total = salesData.total || items.length
+      const pages = salesData.pages != null
+        ? Math.max(1, salesData.pages)
+        : Math.max(1, Math.ceil((salesData.total != null ? salesData.total : items.length) / PER_PAGE))
       setSales(items)
-      setTotalPages(Math.max(1, Math.ceil(total / PER_PAGE)))
+      setTotalPages(pages)
       setSummary(summaryData)
     } catch (err) {
+      if (reqId !== fetchReqId.current) return
       setError(err?.response?.data?.error || 'Failed to load sales data')
     } finally {
-      setLoading(false)
+      if (reqId === fetchReqId.current) setLoading(false)
     }
-  }, [page, statusFilter, searchQuery, orderSearch, skuSearch, saleMonth, matchableFilter])
+  }, [page, statusFilter, debouncedSearch, debouncedOrder, debouncedSku, saleMonth, matchableFilter])
 
   useEffect(() => { fetchData() }, [fetchData])
 
   useEffect(() => {
     setPage(1)
-  }, [searchQuery, orderSearch, statusFilter, skuSearch, saleMonth, matchableFilter])
+  }, [debouncedSearch, debouncedOrder, statusFilter, debouncedSku, saleMonth, matchableFilter])
 
   const fetchAllSalesForExport = useCallback(async () => {
     let pageNum = 1
@@ -229,6 +264,7 @@ export default function Sales() {
 
   const openAdd = () => {
     setEditing(null)
+    setNotesMeta(null)
     setForm({ ...EMPTY_SALE, sale_date: toDatetimeLocal(new Date().toISOString()) })
     setShoeImageInfo(null)
     setShoeImageFile(null)
@@ -241,6 +277,7 @@ export default function Sales() {
   const closeSaleModal = () => {
     setModalOpen(false)
     setEditing(null)
+    setNotesMeta(null)
     setShoeImageInfo(null)
     setShoeImageFile(null)
     setShoeImageUrl('')
@@ -282,6 +319,8 @@ export default function Sales() {
 
   const openEdit = async (sale) => {
     setEditing(sale)
+    const parsedNotes = parseSaleNotes(sale.notes)
+    setNotesMeta(parsedNotes.structured)
     setForm({
       order_number: sale.order_number ?? '',
       shoe_name: sale.shoe_name ?? '',
@@ -294,7 +333,7 @@ export default function Sales() {
       amount_made: sale.amount_made ?? '',
       sale_date: toDatetimeLocal(sale.sale_date),
       status: sale.status ?? 'Pending',
-      notes: sale.notes ?? '',
+      notes: parsedNotes.text,
     })
     setShoeImageInfo(null)
     setShoeImageFile(null)
@@ -329,6 +368,12 @@ export default function Sales() {
         selling_price: form.selling_price !== '' ? Number(form.selling_price) : undefined,
         amount_made: form.amount_made !== '' ? Number(form.amount_made) : undefined,
       }
+      // Preserve any structured notes envelope (e.g. in-person amount_made_php)
+      // rather than overwriting it with the free-text notes field.
+      const notesText = (form.notes || '').trim()
+      payload.notes = notesMeta
+        ? JSON.stringify(notesText ? { ...notesMeta, text: notesText } : notesMeta)
+        : form.notes
       if (editing) {
         await updateSale(editing.sale_id, payload)
       } else {
@@ -525,7 +570,7 @@ export default function Sales() {
             />
             <KPICard
               label="Total Profit (PHP est.)"
-              value={completedProfitPhp != null ? formatPHP(completedProfitPhp) : 'â€”'}
+              value={completedProfitPhp != null ? formatPHP(completedProfitPhp) : '—'}
               valueClassName={completedProfitPhp != null && completedProfitPhp < 0 ? 'text-red-600' : 'text-emerald-600'}
             />
           </div>

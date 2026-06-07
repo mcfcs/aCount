@@ -144,7 +144,8 @@ def list_inventory():
     # Sorting
     sort_by = request.args.get("sort_by", "created_at")
     order = request.args.get("order", "desc")
-    sort_col = getattr(Inventory, sort_by, Inventory.created_at)
+    _valid_sort = {c.key for c in Inventory.__table__.columns}
+    sort_col = getattr(Inventory, sort_by) if sort_by in _valid_sort else Inventory.created_at
     if order == "asc":
         query = query.order_by(sort_col.asc())
     else:

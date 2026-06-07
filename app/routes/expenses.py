@@ -124,7 +124,8 @@ def list_expenses():
 
     sort_by = request.args.get("sort_by", "expense_date")
     order = request.args.get("order", "desc")
-    sort_col = getattr(Expense, sort_by, Expense.expense_date)
+    _valid_sort = {c.key for c in Expense.__table__.columns}
+    sort_col = getattr(Expense, sort_by) if sort_by in _valid_sort else Expense.expense_date
     if order == "asc":
         query = query.order_by(sort_col.asc())
     else:

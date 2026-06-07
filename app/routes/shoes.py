@@ -59,7 +59,8 @@ def list_shoes():
 
     sort_by = request.args.get("sort_by", "sku")
     order = request.args.get("order", "asc")
-    sort_col = getattr(Shoe, sort_by, Shoe.sku)
+    _valid_sort = {c.key for c in Shoe.__table__.columns}
+    sort_col = getattr(Shoe, sort_by) if sort_by in _valid_sort else Shoe.sku
     if order == "desc":
         sort_col = sort_col.desc()
     query = query.order_by(sort_col)

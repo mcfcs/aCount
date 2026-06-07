@@ -20,23 +20,36 @@ function ScrapeProgressIndicator() {
     let mounted = true
     let timer = null
 
-    const poll = async () => {
+    const schedule = (delay) => {
+      timer = window.setTimeout(tick, delay)
+    }
+
+    const tick = async () => {
+      if (!mounted) return
+      // Don't poll while the tab is backgrounded; re-check a little later.
+      if (typeof document !== 'undefined' && document.hidden) {
+        schedule(5000)
+        return
+      }
+      let running = false
       try {
         const data = await getScrapeStatus()
         if (!mounted) return
         setStatus(data)
+        running = Boolean(data?.running)
       } catch {
         if (!mounted) return
         setStatus(null)
       }
+      // Poll quickly while a scrape is active, slowly when idle.
+      if (mounted) schedule(running ? 2500 : 20000)
     }
 
-    poll()
-    timer = window.setInterval(poll, 2500)
+    tick()
 
     return () => {
       mounted = false
-      if (timer) window.clearInterval(timer)
+      if (timer) window.clearTimeout(timer)
     }
   }, [])
 

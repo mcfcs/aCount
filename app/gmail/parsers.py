@@ -249,6 +249,8 @@ def _candidate_from_html_image_src(src: str, cid_images: dict[str, dict]) -> dic
 
         for candidate_url in candidate_urls:
             try:
+                from app.utils import assert_safe_public_url
+                assert_safe_public_url(candidate_url)  # block SSRF (internal addresses)
                 request = urllib.request.Request(candidate_url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(request, timeout=15) as response:
                     content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()

@@ -565,7 +565,8 @@ def _handle_cancellation(data: dict):
 
     # Create fee expense for confirmed cancellations (Spec 4.3 Path B)
     if cancellation_type == "Confirmed" and fee_amount:
-        conversion_rate = 56.0  # Default; replaced by live rate when available
+        from app.utils import get_php_estimate_rate
+        conversion_rate = get_php_estimate_rate()  # honours the rate set in Settings
         expense = Expense(
             category="Platform Fee",
             description=f"Cancellation fee — Order #{sale.order_number}",

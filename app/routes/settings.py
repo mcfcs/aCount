@@ -2,7 +2,7 @@
 Settings API routes for operational maintenance tasks.
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 
 from app import db
 from app.models.models import (
@@ -84,6 +84,11 @@ def reset_database():
       confirm (required): must be exactly "RESET"
       scope   (optional): currently only "all" is supported
     """
+    if not current_app.config.get("ALLOW_DB_RESET", False):
+        return jsonify({
+            "error": "Database reset is disabled. Set ALLOW_DB_RESET=true to enable it."
+        }), 403
+
     data = request.get_json(silent=True) or {}
     confirm = str(data.get("confirm", "")).strip()
     scope = str(data.get("scope", "all")).strip().lower()

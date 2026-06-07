@@ -23,11 +23,19 @@ function formatDate(dateStr) {
 }
 function toDatetimeLocal(iso) {
   if (!iso) return ''
-  try { return new Date(iso).toISOString().slice(0, 16) } catch { return '' }
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  } catch { return '' }
 }
 function toDateInput(iso) {
   if (!iso) return ''
-  try { return new Date(iso).toISOString().slice(0, 10) } catch { return '' }
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+  } catch { return '' }
 }
 
 const INPUT = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'

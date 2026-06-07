@@ -92,7 +92,8 @@ def list_subscriptions():
 
     sort_by = request.args.get("sort_by", "name")
     order = request.args.get("order", "asc")
-    sort_col = getattr(Subscription, sort_by, Subscription.name)
+    _valid_sort = {c.key for c in Subscription.__table__.columns}
+    sort_col = getattr(Subscription, sort_by) if sort_by in _valid_sort else Subscription.name
     if order == "asc":
         query = query.order_by(sort_col.asc())
     else:

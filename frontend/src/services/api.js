@@ -2,7 +2,11 @@ import axios from 'axios'
 
 const client = axios.create({
   baseURL: '/api',
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    // Sent only when configured; the backend enforces it when API_KEY is set.
+    ...(import.meta.env.VITE_API_KEY ? { 'X-API-Key': import.meta.env.VITE_API_KEY } : {}),
+  },
 })
 
 // Dashboard

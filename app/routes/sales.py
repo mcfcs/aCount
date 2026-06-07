@@ -353,7 +353,8 @@ def list_sales():
     # Sorting
     sort_by = request.args.get("sort_by", "sale_date")
     order = request.args.get("order", "desc")
-    sort_col = getattr(Sale, sort_by, Sale.sale_date)
+    _valid_sort = {c.key for c in Sale.__table__.columns}
+    sort_col = getattr(Sale, sort_by) if sort_by in _valid_sort else Sale.sale_date
     if order == "asc":
         query = query.order_by(sort_col.asc())
     else:
@@ -586,7 +587,8 @@ def transition_sale_status(sale_id):
         fee_amount = data.get("cancellation_fee")
         if fee_amount or sale.cancellation_type == "Confirmed":
             fee_usd = float(fee_amount) if fee_amount else 10.0
-            conversion_rate = float(data.get("conversion_rate", 56.0))
+            from app.utils import get_php_estimate_rate
+            conversion_rate = float(data.get("conversion_rate") or get_php_estimate_rate())
             fee_php = fee_usd * conversion_rate
 
             sale.cancellation_fee = fee_usd
