@@ -1,4 +1,5 @@
-import ExcelJS from 'exceljs'
+// exceljs is large (~1MB) and only needed when a user actually exports an Excel
+// workbook. It is imported dynamically so it stays out of the initial bundle.
 
 function arrayBufferToBase64(buffer) {
   let binary = ''
@@ -47,6 +48,7 @@ function downloadBlob(filename, blob) {
 
 export async function exportSellingWorkbook(filename, rows, options = {}) {
   const { showQuantity = true } = options
+  const { default: ExcelJS } = await import('exceljs')
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'aCount'
   workbook.created = new Date()

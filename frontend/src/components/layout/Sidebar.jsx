@@ -61,12 +61,12 @@ export default function Sidebar({ isOpen = false, onClose = () => {} }) {
         isOpen ? 'translate-x-0' : '-translate-x-full'
       } fixed left-0 top-0 bottom-0 z-40 flex w-72 max-w-[85vw] min-w-0 flex-col overflow-hidden border-r border-[#1d1d23] bg-[#0c0c0e] transition-transform duration-300 lg:translate-x-0 lg:z-10`}
     >
-      {/* volt seam down the inner edge */}
-      <span className="pointer-events-none absolute right-0 top-0 h-full w-px bg-linear-to-b from-volt/40 via-transparent to-transparent" />
+      {/* accent seam down the inner edge */}
+      <span className="pointer-events-none absolute right-0 top-0 h-full w-px bg-linear-to-b from-accent/40 via-transparent to-transparent" />
 
       {/* Brand */}
       <div className="flex items-center gap-3 px-6 py-6">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-volt text-[#0a0a0b] shadow-[0_0_22px_-4px_rgba(212,255,63,0.7)]">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent text-white shadow-[0_0_22px_-4px_rgba(177,77,255,0.8)]">
           <span className="font-display text-xl leading-none">₳</span>
         </div>
         <div className="min-w-0">
@@ -95,7 +95,7 @@ export default function Sidebar({ isOpen = false, onClose = () => {} }) {
             className={({ isActive }) =>
               `group relative flex items-center gap-3 overflow-hidden rounded-lg px-3 py-2.5 text-sm font-semibold uppercase tracking-wide transition-all duration-200 ${
                 isActive
-                  ? 'bg-volt/8 text-volt'
+                  ? 'bg-accent/8 text-accent'
                   : 'text-[#74747f] hover:bg-[#ffffff]/4 hover:text-[#f4f4f6]'
               }`
             }
@@ -104,11 +104,11 @@ export default function Sidebar({ isOpen = false, onClose = () => {} }) {
             {({ isActive }) => (
               <>
                 <span
-                  className={`absolute left-0 top-1/2 h-5 w-0.75 -translate-y-1/2 rounded-r bg-volt transition-all duration-200 ${
+                  className={`absolute left-0 top-1/2 h-5 w-0.75 -translate-y-1/2 rounded-r bg-accent transition-all duration-200 ${
                     isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-40'
                   }`}
                 />
-                <span className={`transition-colors ${isActive ? 'text-volt' : 'text-[#5a5a64] group-hover:text-[#f4f4f6]'}`}>
+                <span className={`transition-colors ${isActive ? 'text-accent' : 'text-[#5a5a64] group-hover:text-[#f4f4f6]'}`}>
                   {item.icon}
                 </span>
                 <span className="flex-1">{item.label}</span>
@@ -125,8 +125,8 @@ export default function Sidebar({ isOpen = false, onClose = () => {} }) {
       <div className="border-t border-[#1d1d23] px-6 py-5">
         <div className="flex items-center gap-2">
           <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-volt opacity-60 animate-volt-pulse" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-volt" />
+            <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-60 animate-accent-pulse" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
           </span>
           <p className="kicker">System&nbsp;Live</p>
         </div>

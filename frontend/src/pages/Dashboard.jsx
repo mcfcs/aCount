@@ -104,7 +104,7 @@ export default function Dashboard() {
           </div>
         ) : (
           <section className="ledger-card scanlines relative grid animate-rise grid-cols-1 gap-6 overflow-hidden p-6 sm:p-8 lg:grid-cols-[1.6fr_1fr]">
-            {/* corner volt bracket */}
+            {/* corner accent bracket */}
             <span className="pointer-events-none absolute right-0 top-0 h-24 w-24 bg-indigo-600/10 blur-3xl" />
 
             {/* Net profit figure */}
@@ -132,7 +132,7 @@ export default function Dashboard() {
               </p>
               <span
                 className="mt-4 block h-1 w-28 rounded-full bg-indigo-600"
-                style={{ boxShadow: '0 0 16px -2px rgba(212,255,63,0.6)' }}
+                style={{ boxShadow: '0 0 16px -2px rgba(177,77,255,0.65)' }}
               />
 
               {/* Revenue vs Expenses split bar */}

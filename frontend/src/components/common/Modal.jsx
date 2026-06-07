@@ -2,7 +2,7 @@ export default function Modal({ title, onClose, children }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
       <div className="relative flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl shadow-black/60 animate-rise">
-        {/* volt rule across the top */}
+        {/* accent rule across the top */}
         <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-linear-to-r from-indigo-600 via-indigo-600/30 to-transparent" />
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-gray-100 px-6 py-4">
           <h2 className="font-display text-xl uppercase tracking-wide text-gray-900">{title}</h2>

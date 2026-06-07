@@ -1,12 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Sidebar from './components/layout/Sidebar'
-import Dashboard from './pages/Dashboard'
-import Sales from './pages/Sales'
-import Inventory from './pages/Inventory'
-import Financial from './pages/Financial'
-import Settings from './pages/Settings'
+import LoadingSpinner from './components/common/LoadingSpinner'
 import { cancelScrape, getScrapeStatus } from './services/api'
+
+// Each page is its own async chunk — the heavy charting (recharts) and a page's
+// code only download when that route is first visited, shrinking initial load.
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Sales = lazy(() => import('./pages/Sales'))
+const Inventory = lazy(() => import('./pages/Inventory'))
+const Financial = lazy(() => import('./pages/Financial'))
+const Settings = lazy(() => import('./pages/Settings'))
 
 function ScrapeProgressIndicator() {
   const [status, setStatus] = useState(null)
@@ -114,13 +118,21 @@ export default function App() {
         />
         {/* Main content offset by sidebar width */}
         <div className="flex-1 min-w-0 lg:ml-72">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/sales" element={<Sales />} />
-            <Route path="/inventory" element={<Inventory />} />
-            <Route path="/financial" element={<Financial />} />
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
+          <Suspense
+            fallback={
+              <div className="flex min-h-screen items-center justify-center bg-gray-50">
+                <LoadingSpinner size="lg" />
+              </div>
+            }
+          >
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/sales" element={<Sales />} />
+              <Route path="/inventory" element={<Inventory />} />
+              <Route path="/financial" element={<Financial />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </Suspense>
         </div>
       </div>
       <ScrapeProgressIndicator />
