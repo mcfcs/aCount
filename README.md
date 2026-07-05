@@ -19,6 +19,7 @@ Sneaker resale accounting and financial management system with a Flask API and a
 - Dashboard summaries and financial reporting
 - Gmail ingestion + parsing pipeline with processing logs
 - Shoe catalog with image support
+- Shipping label hub: compiles prepaid label PDFs from Alias confirmation emails and merges selected ones into a single 2-up (label + QR per page) print-ready PDF
 
 ## Tech Stack
 
@@ -123,3 +124,4 @@ npm run preview
 - `/api/dashboard`
 - `/api/settings`
 - `/api/shoes`
+- `/api/labels`

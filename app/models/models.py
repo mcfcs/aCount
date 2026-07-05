@@ -154,6 +154,7 @@ class Sale(db.Model):
     cancellation_type       = db.Column(db.String(30), nullable=True)       # Unconfirmed | Confirmed | Attention Needed
     cancellation_fee        = db.Column(db.Numeric(10, 2), nullable=True)   # USD
     tracking_number         = db.Column(db.String(255), nullable=True)
+    shipping_label_url      = db.Column(db.Text, nullable=True)   # S3 URL to the prepaid label PDF (Confirmation email)
     inventory_match_status  = db.Column(
         db.String(20),
         nullable=False,
@@ -202,6 +203,7 @@ class Sale(db.Model):
             "cancellation_type": self.cancellation_type,
             "cancellation_fee": float(self.cancellation_fee) if self.cancellation_fee else None,
             "tracking_number": self.tracking_number,
+            "shipping_label_url": self.shipping_label_url,
             "inventory_match_status": self.inventory_match_status,
             "notes": self.notes,
             "created_at": self.created_at.isoformat() if self.created_at else None,

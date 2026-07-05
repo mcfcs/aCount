@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS sales (
     cancellation_type       VARCHAR(30)     CHECK (cancellation_type IN ('Unconfirmed', 'Confirmed', 'Attention Needed')),
     cancellation_fee        DECIMAL(10, 2),                  -- USD
     tracking_number         VARCHAR(255),
+    shipping_label_url      TEXT,                            -- S3 URL to prepaid label PDF (Confirmation email)
     inventory_match_status  VARCHAR(20)     NOT NULL DEFAULT 'Unmatched'
                                 CHECK (inventory_match_status IN ('Matched', 'Unmatched')),
     notes                   TEXT,

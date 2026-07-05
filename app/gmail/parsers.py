@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from datetime import datetime
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
+from html import unescape
 from html.parser import HTMLParser
 from app.time_utils import PH_TIMEZONE
 
@@ -131,6 +132,72 @@ def extract_largest_image_part(service, gmail_message: dict) -> dict | None:
 
 def _decode_gmail_base64(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "===")
+
+
+# =============================================================================
+# Shipping label PDF URL extraction (Confirmation emails)
+# =============================================================================
+#
+# The "Order #XXXX - Shipping Label and Instructions" email embeds the prepaid
+# label as a hyperlink (an S3 .pdf URL) on the "Print your prepaid..." line.
+# The HTML stripper used for the text body discards <a href> attributes, so the
+# URL must be pulled from the raw HTML/plain parts before stripping.
+
+# Matches an http(s) URL ending in .pdf, allowing an optional query string
+# (e.g. presigned S3 links). Stops at whitespace, quotes and angle brackets.
+_PDF_URL_RE = re.compile(
+    r'https?://[^\s"\'<>()]+?\.pdf(?:\?[^\s"\'<>()]*)?',
+    re.IGNORECASE,
+)
+
+
+def _find_shipping_label_url(text: str) -> str | None:
+    """Return the shipping-label PDF URL from a blob of text, if present.
+
+    Prefers a URL that looks like an Alias shipping label (host contains
+    ``shippinglabel`` or path contains ``shipping_label``); otherwise falls
+    back to the first .pdf URL found.
+    """
+    if not text:
+        return None
+    candidates = [unescape(m.group(0)) for m in _PDF_URL_RE.finditer(text)]
+    if not candidates:
+        return None
+    for url in candidates:
+        if "shipping" in url.lower():
+            return url
+    return candidates[0]
+
+
+def extract_shipping_label_url(gmail_message: dict) -> str | None:
+    """Extract the prepaid shipping label PDF URL from a Gmail message resource.
+
+    Scans the raw text/html and text/plain parts (before HTML tag stripping)
+    so the anchor href survives. Returns the URL string or None.
+    """
+    payload = gmail_message.get("payload", {}) or {}
+    texts: list[str] = []
+
+    def walk(part: dict):
+        mime_type = str(part.get("mimeType") or "").lower()
+        data = (part.get("body", {}) or {}).get("data")
+        if data and mime_type in ("text/html", "text/plain"):
+            try:
+                texts.append(_decode_gmail_base64(data).decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    walk(payload)
+    if not texts:
+        texts.append(gmail_message.get("snippet", "") or "")
+
+    for text in texts:
+        url = _find_shipping_label_url(text)
+        if url:
+            return url
+    return None
 
 
 class _HTMLImageCollector(HTMLParser):
@@ -488,6 +555,13 @@ def parse_confirmation(subject: str, body: str) -> dict:
     size_match = re.search(r'Size:\s*([\d.]+)', body, re.IGNORECASE)
     if size_match:
         result["size"] = float(size_match.group(1))
+
+    # Shipping label PDF URL — present when the body still carries the raw link
+    # (e.g. the plain-text alternative). The HTML path is handled upstream via
+    # extract_shipping_label_url() and merged into this data before persisting.
+    label_url = _find_shipping_label_url(body)
+    if label_url:
+        result["shipping_label_url"] = label_url
 
     return result
 

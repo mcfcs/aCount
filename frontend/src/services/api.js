@@ -61,6 +61,12 @@ export const deleteSubscription = (id) => client.delete(`/subscriptions/${id}`).
 // Email Log
 export const getEmailLog = (params = {}) => client.get('/email-log', { params }).then(r => r.data)
 
+// Shipping Labels
+export const getLabels = (params = {}) => client.get('/labels', { params }).then(r => r.data)
+// Returns the full axios response so callers can read the PDF blob (r.data)
+// and the X-Labels-Skipped header.
+export const printLabels = (payload) => client.post('/labels/print', payload, { responseType: 'blob' })
+
 // Settings
 export const scrapeEmails = (payload) => client.post('/gmail/scrape', payload).then(r => r.data)
 export const getScrapeStatus = () => client.get('/gmail/scrape-status').then(r => r.data)

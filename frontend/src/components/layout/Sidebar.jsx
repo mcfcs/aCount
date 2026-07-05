@@ -42,6 +42,17 @@ const navItems = [
     ),
   },
   {
+    to: '/labels',
+    label: 'Labels',
+    icon: (
+      <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M7 4v3H4a1 1 0 00-1 1v10a1 1 0 001 1h16a1 1 0 001-1V8a1 1 0 00-1-1h-3V4M7 4h10M7 4v0m10 0v0M8 11h8M8 15h5" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 4h1a1 1 0 011 1v2H6V5a1 1 0 011-1h1" />
+      </svg>
+    ),
+  },
+  {
     to: '/settings',
     label: 'Settings',
     icon: (

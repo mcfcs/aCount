@@ -113,7 +113,7 @@ def _apply_status_inventory_side_effects(sale: Sale, status_updated: bool, new_s
 _WRONG_SIZE_SKU_KEYWORDS = {"wrong size", "wrong sku", "incorrect size", "incorrect sku"}
 
 
-def process_message(gmail_message_id: str, subject: str, sender: str, body: str, sent_at=None, shoe_image=None) -> dict:
+def process_message(gmail_message_id: str, subject: str, sender: str, body: str, sent_at=None, shoe_image=None, shipping_label_url=None) -> dict:
     """
     Main entry point. Processes one Gmail message end-to-end.
     Returns a summary dict: {email_type, status, record_type, record_id, error}
@@ -134,7 +134,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
     status = "Success"
 
     try:
-        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image)
+        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image, shipping_label_url=shipping_label_url)
         if result:
             record_type, record_id = result
     except Exception as e:
@@ -167,7 +167,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
 # Dispatch table
 # =============================================================================
 
-def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None):
+def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None, shipping_label_url=None):
     """Route to the correct handler. Returns (record_type, record_id) or None."""
 
     if email_type == "Sale":
@@ -177,6 +177,10 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_
 
     elif email_type == "Confirmation":
         data = parsers.parse_confirmation(subject, body)
+        # The label URL is extracted from the raw HTML upstream (parsers strip
+        # tags for the text body); prefer that, else whatever the body yielded.
+        if shipping_label_url and not data.get("shipping_label_url"):
+            data["shipping_label_url"] = shipping_label_url
         parsed_data.update(data)
         return _handle_confirmation(data, shoe_image=shoe_image)
 
@@ -364,6 +368,8 @@ def _handle_confirmation(data: dict, shoe_image=None):
         sale.pickup_window = data["pickup_window"]
     if data.get("amount_made"):
         sale.amount_made = data["amount_made"]
+    if data.get("shipping_label_url"):
+        sale.shipping_label_url = data["shipping_label_url"]
 
     db.session.commit()
     if status_updated:
@@ -722,6 +728,8 @@ def _apply_deferred_confirmation(sale: Sale, order_number: int):
                     sale.pickup_window = data["pickup_window"]
                 if data.get("amount_made"):
                     sale.amount_made = float(data["amount_made"])
+                if data.get("shipping_label_url"):
+                    sale.shipping_label_url = data["shipping_label_url"]
                 _apply_status_inventory_side_effects(sale, True, "Confirmed")
                 log.linked_record_id = sale.sale_id
                 log.linked_record_type = "Sale"

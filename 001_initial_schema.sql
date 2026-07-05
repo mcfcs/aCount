@@ -115,6 +115,7 @@ CREATE TABLE sales (
     cancellation_type       cancellation_type,
     cancellation_fee        DECIMAL(10, 2),                -- USD
     tracking_number         VARCHAR(255),
+    shipping_label_url      TEXT,                          -- S3 URL to prepaid label PDF (Confirmation email)
     inventory_match_status  inventory_match_status NOT NULL DEFAULT 'Unmatched',
     notes                   TEXT,
     created_at              TIMESTAMP NOT NULL DEFAULT NOW(),

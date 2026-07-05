@@ -30,8 +30,13 @@ def create_app(config_name="development"):
     migrate.init_app(app, db)
 
     # CORS — restrict browser access to the configured frontend origin(s).
+    # Expose the headers the Labels PDF download needs to read client-side.
     origins = [o.strip() for o in str(app.config.get("CORS_ORIGINS", "")).split(",") if o.strip()]
-    CORS(app, resources={r"/api/*": {"origins": origins or "*"}})
+    CORS(
+        app,
+        resources={r"/api/*": {"origins": origins or "*"}},
+        expose_headers=["Content-Disposition", "X-Labels-Skipped"],
+    )
 
     # Optional API-key gate on every /api/* route. When API_KEY is unset the
     # API stays open (local-dev convenience) but we warn loudly.
@@ -64,6 +69,7 @@ def create_app(config_name="development"):
     from app.routes.dashboard import dashboard_bp
     from app.routes.settings import settings_bp
     from app.routes.shoes import shoes_bp
+    from app.routes.labels import labels_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
@@ -76,6 +82,7 @@ def create_app(config_name="development"):
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(settings_bp, url_prefix="/api/settings")
     app.register_blueprint(shoes_bp, url_prefix="/api/shoes")
+    app.register_blueprint(labels_bp, url_prefix="/api/labels")
 
     # JSON error responses so the API never returns HTML error pages.
     from werkzeug.exceptions import HTTPException

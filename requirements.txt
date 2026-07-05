@@ -4,10 +4,11 @@ flask-marshmallow==1.2.1
 marshmallow-sqlalchemy==1.1.0
 flask-migrate==4.1.0
 flask-cors==5.0.1
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.12
 python-dotenv==1.1.0
 marshmallow-enum==1.5.1
 gunicorn==23.0.0
 google-auth>=2.0
 google-auth-oauthlib>=1.0
 google-api-python-client>=2.0
+pypdf>=4.0

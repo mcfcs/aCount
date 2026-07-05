@@ -10,6 +10,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Sales = lazy(() => import('./pages/Sales'))
 const Inventory = lazy(() => import('./pages/Inventory'))
 const Financial = lazy(() => import('./pages/Financial'))
+const Labels = lazy(() => import('./pages/Labels'))
 const Settings = lazy(() => import('./pages/Settings'))
 
 function ScrapeProgressIndicator() {
@@ -143,6 +144,7 @@ export default function App() {
               <Route path="/sales" element={<Sales />} />
               <Route path="/inventory" element={<Inventory />} />
               <Route path="/financial" element={<Financial />} />
+              <Route path="/labels" element={<Labels />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </Suspense>
