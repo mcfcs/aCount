@@ -5,7 +5,35 @@ import { getLabels, printLabels, refreshLabels } from '../services/api'
 
 const LATEST_LABELS_LIMIT = 10
 
+// Finished sales are hidden by default (toggleable) — you don't reprint them.
+const TERMINAL_STATUSES = new Set(['Completed', 'Cancelled', 'Returned', 'Consigned'])
+
 const FIELD = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
 
 const STATUS_TONES = {
   Pending: 'bg-amber-50 text-amber-700 border-amber-200',
@@ -32,7 +60,9 @@ export default function Labels() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
+  const [showTerminal, setShowTerminal] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
+  const [copyMsg, setCopyMsg] = useState('')
 
   const [printing, setPrinting] = useState(false)
   const [printError, setPrintError] = useState('')
@@ -68,13 +98,21 @@ export default function Labels() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return rows
-    return rows.filter((r) =>
-      String(r.order_number).includes(q) ||
-      (r.shoe_name || '').toLowerCase().includes(q) ||
-      (r.sku || '').toLowerCase().includes(q)
-    )
-  }, [rows, search])
+    return rows.filter((r) => {
+      if (!showTerminal && TERMINAL_STATUSES.has(r.status)) return false
+      if (!q) return true
+      return (
+        String(r.order_number).includes(q) ||
+        (r.shoe_name || '').toLowerCase().includes(q) ||
+        (r.sku || '').toLowerCase().includes(q)
+      )
+    })
+  }, [rows, search, showTerminal])
+
+  const hiddenTerminalCount = useMemo(
+    () => (showTerminal ? 0 : rows.filter((r) => TERMINAL_STATUSES.has(r.status)).length),
+    [rows, showTerminal]
+  )
 
   const allVisibleSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.order_number))
 
@@ -130,6 +168,25 @@ export default function Labels() {
     } finally {
       setRefreshing(false)
     }
+  }
+
+  const handleCopyTracking = async () => {
+    // Copy the selected rows' tracking numbers, or all visible rows if none
+    // are selected. One JANIO number per line, ready to paste.
+    const source = selectedOrderNumbers.length > 0
+      ? filtered.filter((r) => selected.has(r.order_number))
+      : filtered
+    const numbers = source.map((r) => r.tracking_number).filter(Boolean)
+    if (numbers.length === 0) {
+      setCopyMsg('No tracking numbers to copy (labels may need a refresh).')
+      return
+    }
+    const ok = await copyToClipboard(numbers.join('\n'))
+    setCopyMsg(
+      ok
+        ? `Copied ${numbers.length} tracking number(s) to the clipboard.`
+        : 'Copy failed — your browser blocked clipboard access.'
+    )
   }
 
   const handlePrint = async () => {
@@ -198,10 +255,25 @@ export default function Labels() {
               {refreshing ? 'Fetching…' : 'Fetch latest 10'}
             </button>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-xs text-gray-600">
+              <input
+                type="checkbox"
+                checked={showTerminal}
+                onChange={(e) => setShowTerminal(e.target.checked)}
+              />
+              Show completed / cancelled{hiddenTerminalCount > 0 ? ` (${hiddenTerminalCount})` : ''}
+            </label>
             <span className="text-xs text-gray-500">
               {selectedOrderNumbers.length} selected
             </span>
+            <button
+              type="button"
+              onClick={handleCopyTracking}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:border-indigo-400 hover:text-gray-900"
+            >
+              Copy JANIO tracking
+            </button>
             <button
               type="button"
               onClick={handlePrint}
@@ -212,6 +284,10 @@ export default function Labels() {
             </button>
           </div>
         </div>
+
+        {copyMsg && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{copyMsg}</div>
+        )}
 
         {refreshMsg && (
           <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">{refreshMsg}</div>
@@ -259,14 +335,22 @@ export default function Labels() {
             <div className="flex items-center justify-center py-16">
               <LoadingSpinner size="lg" />
             </div>
+          ) : filtered.length === 0 && rows.length > 0 ? (
+            <div className="px-5 py-16 text-center">
+              <p className="text-sm font-medium text-gray-700">No labels match the current filters.</p>
+              <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-gray-500">
+                {hiddenTerminalCount > 0
+                  ? `${hiddenTerminalCount} completed/cancelled label(s) are hidden — tick “Show completed / cancelled” to see them.`
+                  : 'Try clearing the search box.'}
+              </p>
+            </div>
           ) : filtered.length === 0 ? (
             <div className="px-5 py-16 text-center">
               <p className="text-sm font-medium text-gray-700">No shipping labels found.</p>
               <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-gray-500">
                 Labels appear here after the &ldquo;Shipping Label and Instructions&rdquo; emails are processed.
-                Run a Gmail scrape for the relevant date range in{' '}
-                <span className="font-medium text-gray-700">Settings</span> to import them (use force re-scrape if
-                those emails were processed before this feature existed).
+                Click <span className="font-medium text-gray-700">Fetch latest 10</span> above, or run a Gmail scrape
+                for the relevant date range in <span className="font-medium text-gray-700">Settings</span>.
               </p>
             </div>
           ) : (
