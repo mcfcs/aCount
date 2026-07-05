@@ -118,7 +118,8 @@ export default function Labels() {
       const res = await refreshLabels(LATEST_LABELS_LIMIT)
       if (res?.status === 'ok') {
         setRefreshMsg(
-          `Captured ${res.labels_captured ?? 0} label(s) from the latest ${res.total_fetched ?? 0} email(s).`
+          `Synced from Gmail: ${res.labels_captured ?? 0} new label(s), ` +
+          `${res.tracking_backfilled ?? 0} tracking # added, ${res.statuses_updated ?? 0} status(es) updated.`
         )
         await load()
       } else {
@@ -282,6 +283,7 @@ export default function Labels() {
                       />
                     </th>
                     <th className="px-4 py-3 text-left font-semibold">Order #</th>
+                    <th className="px-4 py-3 text-left font-semibold">JANIO Tracking #</th>
                     <th className="px-4 py-3 text-left font-semibold">Shoe</th>
                     <th className="px-4 py-3 text-left font-semibold">Size</th>
                     <th className="px-4 py-3 text-left font-semibold">Status</th>
@@ -302,6 +304,11 @@ export default function Labels() {
                           <input type="checkbox" checked={isSel} onChange={() => toggleOne(r.order_number)} />
                         </td>
                         <td className="px-4 py-3 font-mono text-gray-800">{r.order_number}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-gray-600" onClick={(e) => e.stopPropagation()}>
+                          {r.tracking_number
+                            ? <span className="select-all">{r.tracking_number}</span>
+                            : <span className="text-gray-400">—</span>}
+                        </td>
                         <td className="px-4 py-3 text-gray-800">{r.shoe_name}</td>
                         <td className="px-4 py-3 text-gray-600">{r.size ?? '—'}</td>
                         <td className="px-4 py-3"><StatusPill status={r.status} /></td>

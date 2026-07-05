@@ -10,6 +10,7 @@ PDF starts on its own sheet, so one order never shares a sheet with another.
 
 import io
 import logging
+import re
 import urllib.request
 
 from pypdf import PdfReader, PdfWriter, Transformation
@@ -17,6 +18,9 @@ from pypdf import PdfReader, PdfWriter, Transformation
 from app.utils import assert_safe_public_url
 
 logger = logging.getLogger(__name__)
+
+# JANIO tracking number, e.g. "JAN6118431092786803" — printed on the label.
+_TRACKING_RE = re.compile(r'JAN\d{8,}')
 
 MAX_PDF_BYTES = 25 * 1024 * 1024      # per-label download cap (25 MB)
 DOWNLOAD_TIMEOUT = 20                 # seconds
@@ -52,6 +56,37 @@ def download_pdf(url: str) -> bytes:
     if not raw.startswith(b"%PDF"):
         raise LabelPdfError(f"URL did not return a PDF (content-type: {content_type or 'unknown'}).")
     return raw
+
+
+def extract_tracking_number(pdf_bytes: bytes) -> str | None:
+    """Read the JANIO tracking number (JAN…) printed on a label PDF.
+
+    The QR page line-wraps the number, so we scan every page and return the
+    longest match — the complete, unwrapped value on the label page.
+    """
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception:
+        return None
+
+    matches = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            continue
+        matches.extend(_TRACKING_RE.findall(text))
+
+    return max(matches, key=len) if matches else None
+
+
+def fetch_tracking_number(url: str) -> str | None:
+    """Best-effort: download a label PDF and read its JANIO tracking number."""
+    try:
+        return extract_tracking_number(download_pdf(url))
+    except Exception as exc:
+        logger.warning(f"Could not read tracking number from {url}: {exc}")
+        return None
 
 
 def _place_page(dest, src, cell_x, cell_y, cell_w, cell_h):

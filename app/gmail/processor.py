@@ -368,8 +368,7 @@ def _handle_confirmation(data: dict, shoe_image=None):
         sale.pickup_window = data["pickup_window"]
     if data.get("amount_made"):
         sale.amount_made = data["amount_made"]
-    if data.get("shipping_label_url"):
-        sale.shipping_label_url = data["shipping_label_url"]
+    _capture_shipping_label(sale, data.get("shipping_label_url"))
 
     db.session.commit()
     if status_updated:
@@ -728,8 +727,7 @@ def _apply_deferred_confirmation(sale: Sale, order_number: int):
                     sale.pickup_window = data["pickup_window"]
                 if data.get("amount_made"):
                     sale.amount_made = float(data["amount_made"])
-                if data.get("shipping_label_url"):
-                    sale.shipping_label_url = data["shipping_label_url"]
+                _capture_shipping_label(sale, data.get("shipping_label_url"))
                 _apply_status_inventory_side_effects(sale, True, "Confirmed")
                 log.linked_record_id = sale.sale_id
                 log.linked_record_type = "Sale"
@@ -768,6 +766,22 @@ def _apply_deferred_completion(sale: Sale, order_number: int):
                 break
     except Exception as e:
         logger.warning(f"Could not apply deferred completion for #{order_number}: {e}")
+
+
+def _capture_shipping_label(sale: Sale, url: str | None):
+    """Store the label URL and, if not already known, its JANIO tracking number.
+
+    Tracking extraction downloads the label PDF, so it's best-effort and only
+    runs once per sale (guarded by tracking_number) to keep the pipeline light.
+    """
+    if not url:
+        return
+    sale.shipping_label_url = url
+    if not sale.tracking_number:
+        from app.labels_pdf import fetch_tracking_number
+        tracking = fetch_tracking_number(url)
+        if tracking:
+            sale.tracking_number = tracking
 
 
 def _find_sale(order_number: int | None) -> Sale | None:

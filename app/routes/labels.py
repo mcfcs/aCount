@@ -36,6 +36,7 @@ def _label_row(s: Sale) -> dict:
         "sku": s.sku,
         "size": s.size,
         "status": s.status,
+        "tracking_number": s.tracking_number,
         "shipping_label_url": s.shipping_label_url,
         "shipment_deadline": s.shipment_deadline.isoformat() if s.shipment_deadline else None,
         "confirmation_datetime": s.confirmation_datetime.isoformat() if s.confirmation_datetime else None,

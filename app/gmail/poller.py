@@ -10,6 +10,7 @@ Poll interval is configurable via GMAIL_POLL_INTERVAL_SECONDS (default: 300).
 import os
 import json
 import logging
+import re
 import time
 import copy
 import threading
@@ -359,6 +360,7 @@ def scrape_latest_labels(app, limit: int = 10, force: bool = True) -> dict:
 
         processed = 0
         labels_captured = 0
+        label_orders = set()
         results = []
 
         for msg_id in ordered_ids:
@@ -368,6 +370,9 @@ def scrape_latest_labels(app, limit: int = 10, force: bool = True) -> dict:
                 ).execute()
 
                 subject, sender, body, sent_at = get_message_parts(full_msg)
+                order_match = _ORDER_RE.search(f"{subject} {body}")
+                if order_match:
+                    label_orders.add(int(order_match.group(1)))
                 email_type = classify_email(sender, subject, body)
                 shipping_label_url = extract_shipping_label_url(full_msg) if email_type == "Confirmation" else None
                 # Shoe-image backfill is intentionally skipped here — this action
@@ -393,16 +398,74 @@ def scrape_latest_labels(app, limit: int = 10, force: bool = True) -> dict:
             except Exception as e:
                 logger.exception(f"Error processing label message {msg_id}: {e}")
 
-        logger.info(f"Latest-label scrape complete: {processed} processed, {labels_captured} labels captured.")
+        # Bring statuses current: for the captured orders plus any existing label
+        # sale still in a non-terminal state (which may be stale at "Confirmed"),
+        # process any of their not-yet-seen Alias emails so status advances.
+        orders_to_sync = list(set(label_orders) | _non_terminal_label_orders())[:MAX_STATUS_SYNC_ORDERS]
+        statuses_updated = _sync_order_statuses(service, orders_to_sync)
+
+        # Backfill JANIO tracking numbers for any label still missing one
+        # (e.g. captured before tracking extraction existed).
+        tracking_backfilled = _backfill_missing_tracking()
+
+        logger.info(
+            f"Latest-label scrape complete: {processed} processed, "
+            f"{labels_captured} labels captured, {statuses_updated} statuses updated, "
+            f"{tracking_backfilled} tracking numbers backfilled."
+        )
         return {
             "status": "ok",
             "requested": limit,
             "total_fetched": len(ordered_ids),
             "processed": processed,
             "labels_captured": labels_captured,
+            "statuses_updated": statuses_updated,
+            "tracking_backfilled": tracking_backfilled,
             "labels_total": _count_sales_with_labels(),
             "results": results,
         }
+
+
+# Order-number pattern used to key status syncs to specific orders.
+_ORDER_RE = re.compile(r'Order\s*#(\d+)', re.IGNORECASE)
+
+# Statuses that are final — no point re-checking Gmail for these.
+_TERMINAL_SALE_STATUSES = ("Completed", "Cancelled", "Returned", "Consigned")
+
+# Cap the per-refresh status sync so a large backlog can't fan out unbounded.
+MAX_STATUS_SYNC_ORDERS = 60
+
+# Cap how many label PDFs a single refresh will download to backfill tracking.
+MAX_TRACKING_BACKFILL = 40
+
+
+def _backfill_missing_tracking(cap: int = MAX_TRACKING_BACKFILL) -> int:
+    """Fill Sale.tracking_number for label sales that don't have one yet.
+
+    Each fill downloads the label PDF once; bounded by `cap` so a large backlog
+    is spread across multiple refreshes rather than one very long request.
+    """
+    from app.models.models import Sale
+    from app import db
+    from app.labels_pdf import fetch_tracking_number
+
+    rows = (
+        Sale.query
+        .filter(Sale.shipping_label_url.isnot(None), Sale.shipping_label_url != "")
+        .filter(Sale.tracking_number.is_(None))
+        .limit(cap)
+        .all()
+    )
+
+    filled = 0
+    for sale in rows:
+        tracking = fetch_tracking_number(sale.shipping_label_url)
+        if tracking:
+            sale.tracking_number = tracking
+            filled += 1
+    if filled:
+        db.session.commit()
+    return filled
 
 
 def _count_sales_with_labels() -> int:
@@ -412,6 +475,76 @@ def _count_sales_with_labels() -> int:
         .filter(Sale.shipping_label_url.isnot(None), Sale.shipping_label_url != "")
         .count()
     )
+
+
+def _non_terminal_label_orders() -> set:
+    """Order numbers of label-bearing sales that aren't in a terminal state."""
+    from app.models.models import Sale
+    rows = (
+        Sale.query
+        .with_entities(Sale.order_number)
+        .filter(Sale.shipping_label_url.isnot(None), Sale.shipping_label_url != "")
+        .filter(~Sale.status.in_(_TERMINAL_SALE_STATUSES))
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def _sync_order_statuses(service, order_numbers) -> int:
+    """
+    For each order, process any of its not-yet-processed Alias emails so the
+    sale's status advances to the most recent state (Shipped / Completed /
+    Cancelled / …). Already-processed messages are skipped without a fetch.
+    Returns the number of orders whose status changed.
+    """
+    from app.models.models import EmailProcessingLog, Sale
+    from app import db
+
+    changed = 0
+    for order_number in order_numbers:
+        try:
+            sale = Sale.query.filter_by(order_number=order_number).first()
+            if not sale:
+                continue
+            before = sale.status
+
+            query = f'from:{ALIAS_SENDER} "Order #{order_number}"'
+            response = service.users().messages().list(
+                userId="me", q=query, maxResults=10
+            ).execute()
+            ids = [m["id"] for m in response.get("messages", [])]
+            if not ids:
+                continue
+
+            existing = {
+                row[0] for row in db.session.query(EmailProcessingLog.gmail_message_id)
+                .filter(EmailProcessingLog.gmail_message_id.in_(ids)).all()
+            }
+            new_ids = [i for i in ids if i not in existing]
+            if not new_ids:
+                continue
+
+            # Gmail returns newest-first; process oldest-first for correct flow.
+            for msg_id in reversed(new_ids):
+                full_msg = service.users().messages().get(
+                    userId="me", id=msg_id, format="full"
+                ).execute()
+                subject, sender, body, sent_at = get_message_parts(full_msg)
+                email_type = classify_email(sender, subject, body)
+                url = extract_shipping_label_url(full_msg) if email_type == "Confirmation" else None
+                process_message(
+                    msg_id, subject, sender, body,
+                    sent_at=sent_at, shoe_image=None, shipping_label_url=url,
+                )
+
+            refreshed = Sale.query.filter_by(order_number=order_number).first()
+            if refreshed and refreshed.status != before:
+                changed += 1
+        except Exception as e:
+            logger.warning(f"Status sync failed for order #{order_number}: {e}")
+            continue
+
+    return changed
 
 
 def _scrape_date_range_internal(
