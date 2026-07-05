@@ -63,6 +63,7 @@ export const getEmailLog = (params = {}) => client.get('/email-log', { params })
 
 // Shipping Labels
 export const getLabels = (params = {}) => client.get('/labels', { params }).then(r => r.data)
+export const refreshLabels = (limit = 10) => client.post('/labels/refresh', { limit }).then(r => r.data)
 // Returns the full axios response so callers can read the PDF blob (r.data)
 // and the X-Labels-Skipped header.
 export const printLabels = (payload) => client.post('/labels/print', payload, { responseType: 'blob' })

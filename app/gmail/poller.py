@@ -276,6 +276,144 @@ def scrape_date_range(app, after: str, before: str = None, force: bool = False) 
     )
 
 
+# =============================================================================
+# Shipping-label targeted fetch ("capture the latest N labels")
+# =============================================================================
+
+LABEL_SUBJECT_PHRASE = "Shipping Label and Instructions"
+
+
+def fetch_latest_label_message_ids(service, limit: int = 10) -> list[str]:
+    """
+    Fetch the newest "…Shipping Label and Instructions" message IDs from Alias.
+    Gmail messages.list returns newest-first; we return at most `limit` IDs.
+    """
+    query = f'from:{ALIAS_SENDER} subject:"{LABEL_SUBJECT_PHRASE}"'
+    message_ids: list[str] = []
+    page_token = None
+
+    while len(message_ids) < limit:
+        kwargs = {
+            "userId": "me",
+            "q": query,
+            "maxResults": min(limit - len(message_ids), 100),
+        }
+        if page_token:
+            kwargs["pageToken"] = page_token
+
+        response = service.users().messages().list(**kwargs).execute()
+        for msg in response.get("messages", []):
+            message_ids.append(msg["id"])
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return message_ids[:limit]
+
+
+def scrape_latest_labels(app, limit: int = 10, force: bool = True) -> dict:
+    """
+    Fetch and (re)process the latest N Alias shipping-label emails so their
+    label PDF URLs are captured on the linked sales.
+
+    force=True (default) deletes any existing EmailProcessingLog rows for those
+    messages first, so labels are back-filled even when the confirmation email
+    was already processed before label capture existed.
+    """
+    with app.app_context():
+        from app.models.models import EmailProcessingLog, Sale
+        from app import db
+
+        try:
+            service = get_gmail_service()
+        except RuntimeError as e:
+            logger.error(f"Gmail auth failed: {e}")
+            return {"status": "error", "error": str(e), "processed": 0}
+
+        try:
+            message_ids = fetch_latest_label_message_ids(service, limit=limit)
+        except Exception as e:
+            logger.error(f"Latest-label fetch failed: {e}")
+            return {"status": "error", "error": str(e), "processed": 0}
+
+        if not message_ids:
+            return {
+                "status": "ok",
+                "requested": limit,
+                "total_fetched": 0,
+                "processed": 0,
+                "labels_captured": 0,
+                "labels_total": _count_sales_with_labels(),
+                "results": [],
+            }
+
+        if force:
+            db.session.query(EmailProcessingLog).filter(
+                EmailProcessingLog.gmail_message_id.in_(message_ids)
+            ).delete(synchronize_session=False)
+            db.session.commit()
+
+        # Gmail returns newest-first; process oldest-first so state flows correctly.
+        ordered_ids = list(reversed(_dedupe_message_ids(message_ids)))
+
+        processed = 0
+        labels_captured = 0
+        results = []
+
+        for msg_id in ordered_ids:
+            try:
+                full_msg = service.users().messages().get(
+                    userId="me", id=msg_id, format="full"
+                ).execute()
+
+                subject, sender, body, sent_at = get_message_parts(full_msg)
+                email_type = classify_email(sender, subject, body)
+                shipping_label_url = extract_shipping_label_url(full_msg) if email_type == "Confirmation" else None
+                # Shoe-image backfill is intentionally skipped here — this action
+                # is label-focused and avoids the extra remote image downloads.
+                result = process_message(
+                    msg_id, subject, sender, body,
+                    sent_at=sent_at, shoe_image=None, shipping_label_url=shipping_label_url,
+                )
+                results.append(result)
+
+                if result.get("status") != "skipped":
+                    processed += 1
+                if shipping_label_url:
+                    labels_captured += 1
+
+            except HttpError as e:
+                status = getattr(getattr(e, "resp", None), "status", None)
+                if str(status) == "404":
+                    logger.warning(f"Skipping missing label message {msg_id}: {e}")
+                    results.append({"message_id": msg_id, "status": "skipped", "reason": "not_found"})
+                else:
+                    logger.exception(f"Error processing label message {msg_id}: {e}")
+            except Exception as e:
+                logger.exception(f"Error processing label message {msg_id}: {e}")
+
+        logger.info(f"Latest-label scrape complete: {processed} processed, {labels_captured} labels captured.")
+        return {
+            "status": "ok",
+            "requested": limit,
+            "total_fetched": len(ordered_ids),
+            "processed": processed,
+            "labels_captured": labels_captured,
+            "labels_total": _count_sales_with_labels(),
+            "results": results,
+        }
+
+
+def _count_sales_with_labels() -> int:
+    from app.models.models import Sale
+    return (
+        Sale.query
+        .filter(Sale.shipping_label_url.isnot(None), Sale.shipping_label_url != "")
+        .count()
+    )
+
+
 def _scrape_date_range_internal(
     app,
     after: str,

@@ -14,7 +14,7 @@ Endpoints:
 import io
 import logging
 
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify, send_file, current_app
 from app import db
 from app.models.models import Sale
 from app.labels_pdf import download_pdf, build_two_up_pdf, LabelPdfError
@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 labels_bp = Blueprint("labels", __name__)
 
 MAX_LABELS_PER_PRINT = 50
+MAX_LABELS_PER_REFRESH = 50
+DEFAULT_LABELS_REFRESH = 10
 
 
 def _label_row(s: Sale) -> dict:
@@ -71,6 +73,37 @@ def list_labels():
     sales = query.order_by(Sale.sale_date.desc()).all()
     items = [_label_row(s) for s in sales]
     return jsonify({"items": items, "total": len(items)}), 200
+
+
+@labels_bp.post("/refresh")
+def refresh_labels():
+    """
+    POST /api/labels/refresh
+    Body (JSON, optional): { "limit": 10 }  (1..50, default 10)
+
+    Fetches the latest N "Shipping Label and Instructions" emails from Alias and
+    (re)processes them so their label PDF URLs are captured on the linked sales.
+    Runs synchronously — N is small — and returns a summary.
+    """
+    data = request.get_json(silent=True) or {}
+    limit = data.get("limit", DEFAULT_LABELS_REFRESH)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return jsonify({"error": "'limit' must be an integer."}), 400
+    limit = max(1, min(limit, MAX_LABELS_PER_REFRESH))
+
+    # Imported here to avoid a circular import at module load (poller pulls in
+    # the Gmail stack) and to keep the route import-light.
+    from app.gmail.poller import scrape_latest_labels
+
+    try:
+        result = scrape_latest_labels(current_app._get_current_object(), limit=limit)
+    except Exception as exc:
+        logger.exception(f"Latest-label refresh failed: {exc}")
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+    return jsonify(result), (200 if result.get("status") == "ok" else 502)
 
 
 def _resolve_sales(data: dict):

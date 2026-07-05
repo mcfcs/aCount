@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import TopBar from '../components/layout/TopBar'
 import LoadingSpinner from '../components/common/LoadingSpinner'
-import { getLabels, printLabels } from '../services/api'
+import { getLabels, printLabels, refreshLabels } from '../services/api'
+
+const LATEST_LABELS_LIMIT = 10
 
 const FIELD = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'
 
@@ -37,6 +39,10 @@ export default function Labels() {
   const [skipped, setSkipped] = useState([])
   const [pdfUrl, setPdfUrl] = useState('')
   const pdfUrlRef = useRef('')
+
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMsg, setRefreshMsg] = useState('')
+  const [refreshErr, setRefreshErr] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -104,6 +110,27 @@ export default function Labels() {
     setPdfUrl(url)
   }
 
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    setRefreshMsg('')
+    setRefreshErr('')
+    try {
+      const res = await refreshLabels(LATEST_LABELS_LIMIT)
+      if (res?.status === 'ok') {
+        setRefreshMsg(
+          `Captured ${res.labels_captured ?? 0} label(s) from the latest ${res.total_fetched ?? 0} email(s).`
+        )
+        await load()
+      } else {
+        setRefreshErr(res?.error || 'Could not fetch labels from Gmail.')
+      }
+    } catch (err) {
+      setRefreshErr(err?.response?.data?.error || 'Could not fetch labels from Gmail.')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const handlePrint = async () => {
     if (selectedOrderNumbers.length === 0) return
     setPrinting(true)
@@ -153,7 +180,7 @@ export default function Labels() {
 
         {/* Controls */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="w-full sm:max-w-xs">
+          <div className="flex w-full items-center gap-2 sm:max-w-md">
             <input
               type="search"
               placeholder="Search order #, shoe, or SKU"
@@ -161,6 +188,14 @@ export default function Labels() {
               onChange={(e) => setSearch(e.target.value)}
               className={FIELD}
             />
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="shrink-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:border-indigo-400 hover:text-gray-900 disabled:opacity-50"
+            >
+              {refreshing ? 'Fetching…' : 'Fetch latest 10'}
+            </button>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500">
@@ -176,6 +211,13 @@ export default function Labels() {
             </button>
           </div>
         </div>
+
+        {refreshMsg && (
+          <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">{refreshMsg}</div>
+        )}
+        {refreshErr && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{refreshErr}</div>
+        )}
 
         {/* Result / warnings */}
         {pdfUrl && (

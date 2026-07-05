@@ -73,10 +73,15 @@ def _place_page(dest, src, cell_x, cell_y, cell_w, cell_h):
     ty = cell_y + (cell_h - sh * scale) / 2.0
 
     # Normalise origin to (0,0), scale to fit, then translate into the cell.
-    src.add_transformation(
-        Transformation().translate(-x0, -y0).scale(scale).translate(tx, ty)
-    )
-    dest.merge_page(src)
+    #
+    # Use merge_transformed_page (not add_transformation + merge_page): the
+    # transform is applied to the page's Form XObject *via the Do operator*,
+    # so the form's BBox clips in the page's own coordinate space and only
+    # then is the whole thing scaled into the cell. Baking the scale inside
+    # the form instead leaves its BBox at the original (unscaled) size, which
+    # clips any page we scale UP (e.g. a small 300x420 label) — cropping it.
+    transform = Transformation().translate(-x0, -y0).scale(scale).translate(tx, ty)
+    dest.merge_transformed_page(src, transform)
 
 
 def build_two_up_pdf(pdf_bytes_list) -> bytes:
