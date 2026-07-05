@@ -14,6 +14,7 @@ import re
 import time
 import copy
 import threading
+from datetime import datetime, timedelta
 from typing import Optional
 
 from app.gmail.auth import get_gmail_service
@@ -27,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".poll_state.json")
 ALIAS_SENDER = "info@alias.org"
+
+# When Gmail's incremental history is unavailable (first run, or the stored
+# historyId expired after downtime), catch up by date instead of just grabbing
+# the most recent handful — otherwise a downtime backlog is silently skipped.
+CATCH_UP_DEFAULT_DAYS = 30
+CATCH_UP_MAX_MESSAGES = 1000
 
 _SCRAPE_STATUS_LOCK = threading.Lock()
 _SCRAPE_STATUS = {
@@ -109,10 +116,10 @@ def poll_once(app) -> dict:
 
         try:
             if history_id:
-                messages = _fetch_since_history(service, history_id)
+                messages = _fetch_since_history(service, history_id, state)
             else:
-                # First run: fetch recent unread emails from alias.org
-                messages = _fetch_recent(service)
+                # First run: catch up by date rather than only the recent handful.
+                messages = _fetch_catch_up(service, state)
         except Exception as e:
             logger.error(f"Gmail API fetch failed: {e}")
             return {"status": "error", "error": str(e), "processed": 0}
@@ -168,7 +175,7 @@ def poll_once(app) -> dict:
         }
 
 
-def _fetch_since_history(service, history_id: str) -> list[str]:
+def _fetch_since_history(service, history_id: str, state: dict) -> list[str]:
     """
     Spec 3.4: Use history.list to fetch only new messages since last poll.
     Returns list of message IDs.
@@ -188,9 +195,10 @@ def _fetch_since_history(service, history_id: str) -> list[str]:
         try:
             response = service.users().history().list(**kwargs).execute()
         except Exception as e:
-            # historyId may have expired — fall back to recent fetch
+            # historyId expired (e.g. after downtime) — catch up by date so the
+            # backlog isn't skipped, rather than only fetching the recent handful.
             logger.warning(f"History fetch failed (historyId may be stale): {e}")
-            return _fetch_recent(service)
+            return _fetch_catch_up(service, state)
 
         for history_item in response.get("history", []):
             for msg in history_item.get("messagesAdded", []):
@@ -201,6 +209,32 @@ def _fetch_since_history(service, history_id: str) -> list[str]:
             break
 
     return message_ids
+
+
+def _fetch_catch_up(service, state: dict) -> list[str]:
+    """
+    Fetch all alias.org emails since the last successful poll (minus a day of
+    overlap for safety), or the last CATCH_UP_DEFAULT_DAYS if that's unknown.
+
+    This is the recovery path used on first run and whenever Gmail's history
+    API can't serve the stored historyId — typically after the app has been
+    offline long enough for the history to expire. It ensures a downtime
+    backlog (Shipped/Completed/Cancelled emails, etc.) is picked up instead of
+    only the most recent messages. Already-processed messages are de-duplicated
+    downstream by the EmailProcessingLog check, so re-fetching is harmless.
+    """
+    after_date = None
+    last_poll = state.get("last_poll")
+    if last_poll:
+        try:
+            after_date = (datetime.fromisoformat(last_poll) - timedelta(days=1)).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            after_date = None
+    if not after_date:
+        after_date = (now() - timedelta(days=CATCH_UP_DEFAULT_DAYS)).strftime("%Y-%m-%d")
+
+    logger.info(f"History unavailable — catching up on alias emails since {after_date}.")
+    return fetch_date_range(service, after=after_date, max_results=CATCH_UP_MAX_MESSAGES)
 
 
 def _fetch_recent(service, max_results: int = 50) -> list[str]:
