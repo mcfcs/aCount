@@ -27,6 +27,10 @@ class Config:
     # The destructive /api/settings/reset endpoint is disabled unless opted in.
     ALLOW_DB_RESET = _as_bool(os.getenv("ALLOW_DB_RESET"), default=False)
 
+    # UPCitemdb key for barcode lookups. Leave unset to use the keyless free
+    # trial tier (~100 lookups/day per IP); confirmed scans are cached locally.
+    UPCITEMDB_API_KEY = os.getenv("UPCITEMDB_API_KEY")
+
 
 class DevelopmentConfig(Config):
     DEBUG = True

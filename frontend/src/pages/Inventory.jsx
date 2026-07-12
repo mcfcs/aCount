@@ -5,6 +5,7 @@ import LoadingSpinner from '../components/common/LoadingSpinner'
 import EmptyState from '../components/common/EmptyState'
 import Modal from '../components/common/Modal'
 import ImageDropInput from '../components/common/ImageDropInput'
+import BarcodeScannerModal from '../components/common/BarcodeScannerModal'
 import { exportToCsv } from '../utils/csv'
 import { exportSellingWorkbook } from '../utils/excel'
 import { useDebounce } from '../utils/useDebounce'
@@ -279,6 +280,7 @@ export default function Inventory() {
   const [sellingExportSizeBase, setSellingExportSizeBase] = useState('us')
 
   const [modalOpen, setModalOpen] = useState(false)
+  const [scannerOpen, setScannerOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(EMPTY_ITEM)
   const [itemShoeImageInfo, setItemShoeImageInfo] = useState(null)
@@ -1286,6 +1288,12 @@ export default function Inventory() {
             className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors sm:ml-auto sm:w-auto">
             {activeView === 'shoes' ? '+ Add Shoe' : '+ Add Item'}
           </button>
+          {activeView !== 'shoes' && (
+            <button onClick={() => setScannerOpen(true)}
+              className="w-full rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 transition-colors sm:w-auto">
+              ▤ Scan Barcode
+            </button>
+          )}
         </div>
 
         {(activeView === 'inventory' || activeView === 'selling') && (visibleQuickSizeOptions.length > 0 || !quickSizeOptionsLoaded) && (
@@ -1656,6 +1664,16 @@ export default function Inventory() {
           ))}
         </div>
       </div>
+
+      {scannerOpen && (
+        <BarcodeScannerModal
+          onClose={() => setScannerOpen(false)}
+          onItemAdded={async () => {
+            await refreshQuickSizeOptions()
+            fetchData()
+          }}
+        />
+      )}
 
       {modalOpen && (
         <Modal title={editing ? `Edit — ${editing.shoe_name}` : 'Add Inventory Item'} onClose={closeInventoryModal}>

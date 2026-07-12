@@ -70,6 +70,7 @@ def create_app(config_name="development"):
     from app.routes.settings import settings_bp
     from app.routes.shoes import shoes_bp
     from app.routes.labels import labels_bp
+    from app.routes.barcodes import barcodes_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
@@ -83,6 +84,7 @@ def create_app(config_name="development"):
     app.register_blueprint(settings_bp, url_prefix="/api/settings")
     app.register_blueprint(shoes_bp, url_prefix="/api/shoes")
     app.register_blueprint(labels_bp, url_prefix="/api/labels")
+    app.register_blueprint(barcodes_bp, url_prefix="/api/barcodes")
 
     # JSON error responses so the API never returns HTML error pages.
     from werkzeug.exceptions import HTTPException

@@ -20,6 +20,22 @@ Sneaker resale accounting and financial management system with a Flask API and a
 - Gmail ingestion + parsing pipeline with processing logs
 - Shoe catalog with image support
 - Shipping label hub: compiles prepaid label PDFs from Alias confirmation emails and merges selected ones into a single 2-up (label + QR per page) print-ready PDF
+- Barcode scanning: scan the UPC/EAN on a shoe box (camera or photo upload) to look up brand/name/size and add the pair to inventory after confirmation
+
+## Barcode Scanning
+
+Open **Inventory → Scan Barcode**. Point the camera at the UPC/EAN barcode on the box label, upload a photo of it, or type the number. The app looks the code up and shows a popup with the shoe's details (brand, name, size, style code, product image) for you to verify — confirming adds the pair to inventory.
+
+How lookups resolve:
+
+1. **Local `product_barcodes` table** — every confirmed scan is remembered, so rescanning a barcode you've added before is instant and offline.
+2. **[UPCitemdb](https://www.upcitemdb.com/)** — keyless free trial tier (~100 lookups/day per IP). Set `UPCITEMDB_API_KEY` in `.env` to use the paid tier. Codes that aren't indexed (common for region-exclusive releases) fall back to manual entry in the same popup, and are remembered once confirmed.
+
+Camera notes:
+
+- On the dev machine, `http://localhost:5173` works as-is (localhost is a secure context).
+- To scan **from a phone**, browsers require HTTPS: start the frontend with `VITE_HTTPS=1` (e.g. PowerShell: `$env:VITE_HTTPS='1'; npm run dev`) and open the `https://<LAN-IP>:5173` URL shown by Vite, accepting the self-signed certificate warning.
+- Photo upload works everywhere without HTTPS. Use JPG/PNG (browsers can't decode HEIC outside Safari).
 
 ## Tech Stack
 

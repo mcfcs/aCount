@@ -38,6 +38,10 @@ export const ensureShoeWithImage = (formData) => client.post('/shoes/ensure', fo
   headers: { 'Content-Type': 'multipart/form-data' },
 }).then(r => r.data)
 
+// Barcode scanning
+export const lookupBarcode = (code) => client.get(`/barcodes/lookup/${encodeURIComponent(code)}`).then(r => r.data)
+export const confirmBarcodeAdd = (data) => client.post('/barcodes/confirm', data).then(r => r.data)
+
 // Bank Transfers
 export const getBankTransfers = (params = {}) => client.get('/bank-transfers', { params }).then(r => r.data)
 export const getBankTransfersSummary = () => client.get('/bank-transfers/summary').then(r => r.data)

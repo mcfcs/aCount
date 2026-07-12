@@ -58,6 +58,43 @@ class Shoe(db.Model):
         }
 
 
+# ---------------------------------------------------------------------------
+# ProductBarcodes — GTIN (UPC/EAN) → shoe/size mapping
+# ---------------------------------------------------------------------------
+# Retail shoe barcodes encode one specific style + size, so each barcode maps
+# to a SKU plus a size. Rows are cached from external lookups and overwritten
+# with user-verified values when a scan is confirmed into inventory.
+
+
+class ProductBarcode(db.Model):
+    __tablename__ = "product_barcodes"
+
+    barcode_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    barcode = db.Column(db.String(14), nullable=False, unique=True)  # canonical GTIN-13
+    sku = db.Column(db.String(100), nullable=True)
+    size = db.Column(db.Float, nullable=True)
+    name = db.Column(db.String(500), nullable=True)
+    brand = db.Column(db.String(50), nullable=True)
+    image_url = db.Column(db.String(1000), nullable=True)
+    source = db.Column(db.String(30), nullable=False, default="lookup")  # lookup | confirmed
+    created_at = db.Column(db.DateTime, nullable=False, default=now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now, onupdate=now)
+
+    def to_dict(self):
+        return {
+            "barcode_id": self.barcode_id,
+            "barcode": self.barcode,
+            "sku": self.sku,
+            "size": self.size,
+            "name": self.name,
+            "brand": self.brand,
+            "image_url": self.image_url,
+            "source": self.source,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 # Inventory (Section 5.1)
 # ---------------------------------------------------------------------------
 
