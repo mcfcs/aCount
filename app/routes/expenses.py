@@ -13,7 +13,10 @@ expenses_bp = Blueprint("expenses", __name__)
 
 # ---- Constants ------------------------------------------------------------
 
-VALID_CATEGORIES = ("Platform Fee", "Subscription", "Personal Order", "Sneaker Purchase", "Other")
+VALID_CATEGORIES = (
+    "Platform Fee", "Sneaker Purchase", "Personal Order", "Subscription",
+    "Shipping", "Storage", "Supplies", "Other",
+)
 
 
 # ---- Validation -----------------------------------------------------------

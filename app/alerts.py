@@ -5,8 +5,21 @@ notification scheduler (Spec §7).
 
 from datetime import datetime, timedelta
 
-from app.models.models import BankTransfer, Inventory, Sale
+from app import db
+from app.models.models import BankTransfer, BankTransferAllocation, Inventory, Sale
 from app.time_utils import now
+from app.utils import get_php_estimate_rate
+
+# A sale is flagged "at a loss" when estimated payout is below cost by more than
+# this (₱; a buffer avoids break-even noise). Only IN-FLIGHT sales are flagged
+# (Confirmed/Shipped) — the loss is still worth noticing before it's realized;
+# already-Completed losses are historical and would just flood the list.
+LOSS_BUFFER_PHP = 50.0
+# Earnings "awaiting payout": completed sales unpaid between this many days ago
+# and the recent-window cap. The window keeps ancient un-reconcilable rows (data
+# artifacts) from dominating the real "Alias owes you recently" signal.
+AWAITING_PAYOUT_MIN_DAYS = 5
+AWAITING_PAYOUT_WINDOW_DAYS = 45
 
 
 def _to_naive_dt(value):
@@ -184,6 +197,68 @@ def build_alerts():
                 f"{item.shoe_name} (size {item.size}) consignment expires in {days_until_fee} days — $2/month storage fee starts."
                 if days_until_fee > 0 else
                 f"{item.shoe_name} (size {item.size}) is past 90-day consignment window — $2/month storage fee active."
+            ),
+        })
+
+    # --- Sold at a loss (High) — cross-entity: only aCount knows both the USD
+    #     payout and the PHP cost basis. Only IN-FLIGHT sales, real losses. ---
+    rate = get_php_estimate_rate()
+    margin_candidates = (
+        Sale.query
+        .filter(Sale.status.in_(["Confirmed", "Shipped"]))
+        .filter(Sale.amount_made != None)  # noqa: E711
+        .filter(Sale.purchase_cost != None)  # noqa: E711
+        .all()
+    )
+    for sale in margin_candidates:
+        payout_php = float(sale.amount_made) * rate
+        cost_php = float(sale.purchase_cost)
+        margin = payout_php - cost_php
+        if margin < -LOSS_BUFFER_PHP:
+            items.append({
+                "type": "sold_at_loss",
+                "urgency": "high",
+                "sale_id": sale.sale_id,
+                "order_number": sale.order_number,
+                "shoe_name": sale.shoe_name,
+                "margin_php": round(margin, 2),
+                "payout_php": round(payout_php, 2),
+                "cost_php": round(cost_php, 2),
+                "message": (
+                    f"Order #{sale.order_number} ({sale.shoe_name}) is set to sell at a loss: "
+                    f"≈₱{payout_php:,.0f} payout vs ₱{cost_php:,.0f} cost (−₱{abs(margin):,.0f})."
+                ),
+            })
+
+    # --- Earnings awaiting payout (Medium) — recent Completed earnings not yet
+    #     settled by any transfer, aged AWAITING_PAYOUT_MIN_DAYS..WINDOW. ---
+    allocated_ids = {row[0] for row in db.session.query(BankTransferAllocation.sale_id).all()}
+    payout_min = (now_ts - timedelta(days=AWAITING_PAYOUT_MIN_DAYS)).date()
+    payout_window = (now_ts - timedelta(days=AWAITING_PAYOUT_WINDOW_DAYS)).date()
+    awaiting = (
+        Sale.query
+        .filter(Sale.status == "Completed")
+        .filter(Sale.amount_made != None)  # noqa: E711
+        .filter(Sale.completion_date != None)  # noqa: E711
+        .filter(Sale.completion_date <= payout_min)
+        .filter(Sale.completion_date >= payout_window)
+        .all()
+    )
+    awaiting = [s for s in awaiting if s.sale_id not in allocated_ids]
+    if awaiting:
+        total_usd = sum(float(s.amount_made) for s in awaiting)
+        oldest = min(s.completion_date for s in awaiting)
+        days_oldest = (now_ts.date() - oldest).days
+        items.append({
+            "type": "earnings_awaiting_payout",
+            "urgency": "medium",
+            "sale_count": len(awaiting),
+            "total_usd": round(total_usd, 2),
+            "est_total_php": round(total_usd * rate, 2),
+            "oldest_days": days_oldest,
+            "message": (
+                f"${total_usd:,.2f} (≈₱{total_usd * rate:,.0f}) across {len(awaiting)} completed "
+                f"sale{'s' if len(awaiting) != 1 else ''} is awaiting payout — oldest {days_oldest}d."
             ),
         })
 

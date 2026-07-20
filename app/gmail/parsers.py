@@ -837,40 +837,246 @@ def infer_expense_kind(subject: str, merchant: str) -> str:
     return "Personal Order"
 
 
-def parse_payment_amount(subject: str, body: str) -> dict:
-    """Best-effort charge extraction from a merchant email.
+# The amount may sit on the SAME line or a FOLLOWING line — the HTML→text
+# stripper puts table cells on separate lines (Shopee/Lazada), so we search
+# forward from the label for the next currency-tagged number.
+#
+# Tier 1 — the DEFINITIVE grand total the buyer paid. Multi-seller Shopee
+# "payment confirmed" emails split one purchase across sellers (each with its
+# own "Total Payment") and reconcile them in a Payment-Details "Amount Paid"
+# line = the true charge. When present it wins outright.
+_GRAND_TOTAL_LABELS = (
+    r"amount paid",
+    r"grand total",
+    r"total amount payable",
+    r"amount payable",
+)
+# Tier 2 — per-order totals. SUM every occurrence of the first matching label:
+# a single-order email has one (→ itself); a multi-order email without an
+# "Amount Paid" line has several (→ their sum = the charge).
+_ORDER_TOTAL_LABELS = (
+    r"total payment",
+    r"total paid",
+    r"net payment",
+    r"payment total",
+    r"order total",
+)
+# Tier 3 — generic "total" as a last resort. The negative lookbehind keeps it
+# from matching "Subtotal" (the pre-discount figure that caused the overcharge).
+_GENERIC_TOTAL_LABELS = (
+    r"(?<!sub)(?<!sub-)(?<!sub )total amount",
+    r"(?<!sub)(?<!sub-)(?<!sub )total due",
+    r"you (?:paid|pay)",
+    r"(?<!sub)(?<!sub-)(?<!sub )total",
+)
 
-    Prefers amounts on lines containing payment keywords (Total/Amount/...),
-    falling back to the first currency-tagged amount anywhere. Returns
-    {"amount": float, "currency": "PHP"|"USD"} or {} when nothing parses.
+# Lines whose amount must NEVER be taken as the charge: reductions and the
+# pre-discount subtotal. (Shipping *fees* are additive, so not excluded here.)
+_NON_TOTAL_LINE_RE = re.compile(
+    r"(?:sub\s*-?\s*total|voucher|discount|promo|rebate|cashback|coins?|"
+    r"savings|you saved)",
+    re.IGNORECASE,
+)
+
+
+def _amount_match_to_result(match) -> dict:
+    try:
+        amount = float(match.group("amount").replace(",", ""))
+    except (TypeError, ValueError):
+        return {}
+    if amount <= 0:
+        return {}
+    return {"amount": amount, "currency": "PHP" if match.group("php") else "USD"}
+
+
+def _amounts_after_label(text: str, label_regex: str, window: int = 160) -> list[dict]:
+    """Return {amount, currency} for EVERY currency amount within `window` chars
+    after each `label_regex` occurrence, skipping labels that sit on a reduction
+    line (discount/voucher/subtotal). [] if none found."""
+    results = []
+    for m in re.finditer(label_regex, text, re.IGNORECASE):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        if line_end == -1:
+            line_end = len(text)
+        if _NON_TOTAL_LINE_RE.search(text[line_start:line_end]):
+            continue
+        amt = _PAYMENT_AMOUNT_RE.search(text[m.end():m.end() + window])
+        if amt:
+            result = _amount_match_to_result(amt)
+            if result:
+                results.append(result)
+    return results
+
+
+def _amount_after_label(text: str, label_regex: str, window: int = 160) -> dict:
+    """First currency amount after `label_regex` (see _amounts_after_label)."""
+    hits = _amounts_after_label(text, label_regex, window)
+    return hits[0] if hits else {}
+
+
+def parse_payment_amount(subject: str, body: str) -> dict:
+    """Best-effort NET charge extraction from a merchant email.
+
+    Selects the final payable by LABEL priority, never by magnitude — taking the
+    largest amount grabbed the pre-discount subtotal (e.g. ₱9,000 shown instead
+    of the ₱6,763 actually paid after a voucher). A definitive "Amount Paid" /
+    "Grand Total" wins; otherwise per-order "Total Payment" lines are SUMMED (a
+    multi-seller order splits the charge across sellers). Discount/subtotal/
+    voucher lines are excluded. Returns {"amount": float, "currency": ...} or {}.
     """
     text = f"{subject}\n{body or ''}"
 
-    def _match_to_result(match):
-        try:
-            amount = float(match.group("amount").replace(",", ""))
-        except (TypeError, ValueError):
-            return {}
-        if amount <= 0:
-            return {}
-        return {"amount": amount, "currency": "PHP" if match.group("php") else "USD"}
+    # 1) Definitive grand total (multi-order emails reconcile to "Amount Paid").
+    for label in _GRAND_TOTAL_LABELS:
+        hit = _amount_after_label(text, label)
+        if hit:
+            return hit
 
+    # 2) Per-order totals — sum all occurrences of the first matching label.
+    for label in _ORDER_TOTAL_LABELS:
+        hits = _amounts_after_label(text, label)
+        if hits:
+            currency = hits[0]["currency"]
+            total = sum(h["amount"] for h in hits if h["currency"] == currency)
+            return {"amount": round(total, 2), "currency": currency}
+
+    # 3) Generic "total" (excludes Subtotal via lookbehind).
+    for label in _GENERIC_TOTAL_LABELS:
+        hit = _amount_after_label(text, label)
+        if hit:
+            return hit
+
+    # 4) Fallback: keyworded amounts, excluding reduction lines. Prefer the LAST
+    #    (order totals sit at the bottom, below item rows) — not the max.
     keyword_hits = []
     for line in text.splitlines():
         line_lower = line.lower()
+        if _NON_TOTAL_LINE_RE.search(line_lower):
+            continue
         if any(kw in line_lower for kw in _PAYMENT_KEYWORDS):
             for match in _PAYMENT_AMOUNT_RE.finditer(line):
-                result = _match_to_result(match)
+                result = _amount_match_to_result(match)
                 if result:
                     keyword_hits.append(result)
     if keyword_hits:
-        # The largest keyworded amount is usually the order total (item lines
-        # are smaller; "Total" repeats the sum).
-        return max(keyword_hits, key=lambda r: r["amount"])
+        return keyword_hits[-1]
 
-    for match in _PAYMENT_AMOUNT_RE.finditer(text):
-        result = _match_to_result(match)
-        if result:
-            return result
+    # 5) Last currency amount anywhere (receipts put the total near the end).
+    fallback = [r for r in (_amount_match_to_result(m)
+                for m in _PAYMENT_AMOUNT_RE.finditer(text)) if r]
+    if fallback:
+        return fallback[-1]
     return {}
+
+
+# =============================================================================
+# Order line items + human-readable breakdown snippet
+# =============================================================================
+
+# Names that are clearly email boilerplate, not products.
+_ITEM_NAME_BLOCKLIST_RE = re.compile(
+    r"(?:return|refund|track|order id|order date|seller|subtotal|voucher|"
+    r"shipping|total|quantity|variation|contact|survey)",
+    re.IGNORECASE,
+)
+
+
+def parse_order_items(body: str) -> list[dict]:
+    """Best-effort line items from a merchant order email (Shopee/Lazada shape:
+    an enumerated "N." item name, then Variation / Quantity rows). Returns a
+    list of {"name", "variation", "qty"} dicts; [] when nothing parses."""
+    if not body:
+        return []
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    items: list[dict] = []
+    i = 0
+    while i < len(lines) and len(items) < 20:
+        m = re.match(r"^(\d{1,2})\.\s*(.*)$", lines[i])
+        if not m:
+            i += 1
+            continue
+        name = m.group(2).strip()
+        j = i + 1
+        if not name and j < len(lines):  # "N." bullet alone → name on next line
+            name = lines[j].strip()
+            j += 1
+
+        variation, qty = None, None
+        for k in range(j, min(j + 8, len(lines))):
+            if re.match(r"^\d{1,2}\.\s", lines[k]):  # next item — stop
+                break
+            vm = re.match(r"^Variation:?\s*(.*)$", lines[k], re.IGNORECASE)
+            if vm:
+                variation = vm.group(1).strip() or (
+                    lines[k + 1].strip() if k + 1 < len(lines) else None)
+            qm = re.match(r"^Quantity:?\s*(.*)$", lines[k], re.IGNORECASE)
+            if qm:
+                qty = qm.group(1).strip() or (
+                    lines[k + 1].strip() if k + 1 < len(lines) else None)
+
+        if name and len(name) >= 4 and not _ITEM_NAME_BLOCKLIST_RE.search(name):
+            items.append({"name": name[:300], "variation": variation, "qty": qty})
+        i += 1
+    return items
+
+
+def summarize_items(items: list[dict]) -> str:
+    """One-line human description from parsed items, e.g.
+    'adidas Bw Army Shoes (Brown, 9 UK) ×1; Nike AF1'. '' when empty."""
+    parts = []
+    for it in items:
+        s = it.get("name", "")
+        if it.get("variation"):
+            s += f" ({it['variation']})"
+        qty = str(it.get("qty") or "").strip()
+        if qty and qty not in ("1", "0"):
+            s += f" ×{qty}"
+        if s:
+            parts.append(s)
+    return "; ".join(parts)[:500]
+
+
+_SNIPPET_MONEY_RE = re.compile(r"^(?:₱|Php|PHP|\$|USD)\s*[\d,]+(?:\.\d{1,2})?$", re.IGNORECASE)
+_SNIPPET_LABEL_RE = re.compile(
+    r"(subtotal|voucher|discount|promo|shipping|coins|grand total|total payment|"
+    r"order total|amount paid|total)",
+    re.IGNORECASE,
+)
+
+
+def build_charge_snippet(subject: str, body: str, items: list[dict] | None = None) -> str:
+    """Compact, human-readable breakdown for an expense's detail view: item
+    lines followed by the money breakdown (subtotal / discount / shipping /
+    total). Pairs a label line with a trailing or next-line amount so it works
+    with the stripped-table layout. Returns '' when nothing useful parses."""
+    out: list[str] = []
+    for it in (items or []):
+        s = it.get("name", "")
+        if it.get("variation"):
+            s += f" ({it['variation']})"
+        qty = str(it.get("qty") or "").strip()
+        if qty and qty not in ("1", "0"):
+            s += f" ×{qty}"
+        if s:
+            out.append(s)
+
+    raw = [ln.strip() for ln in (body or "").splitlines() if ln.strip()]
+    for idx, ln in enumerate(raw):
+        if len(out) >= 12:
+            break
+        if not _SNIPPET_LABEL_RE.search(ln) or _SNIPPET_MONEY_RE.match(ln):
+            continue
+        inline = _PAYMENT_AMOUNT_RE.search(ln)
+        amt = None
+        if inline:
+            amt = ln[inline.start():].strip()
+        elif idx + 1 < len(raw) and _SNIPPET_MONEY_RE.match(raw[idx + 1]):
+            amt = raw[idx + 1]
+        if amt:
+            label = re.sub(r"[:\-\s]+$", "", ln).strip()
+            entry = f"{label}: {amt}"
+            if entry not in out:
+                out.append(entry)
+    return "\n".join(out)[:1000]
 

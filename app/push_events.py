@@ -12,13 +12,28 @@ Two sources, both driven from the Gmail poller thread:
 import logging
 
 from app.alerts import build_alerts
-from app.models.models import BankTransfer, Sale
+from app.models.models import AppSetting, BankTransfer, Sale
 from app.push_utils import notify_once, prune_sent_log, push_configured
 
 logger = logging.getLogger(__name__)
 
 # Email types that never warrant a push.
 _SILENT_EMAIL_TYPES = {"Purchase", "Receipt", "Subscription", "Other", None, ""}
+
+# Routine per-email lifecycle pushes (new sale / confirmed / shipped / …)
+# duplicate what Alias + Gmail already notify, so they are OFF by default and
+# gated behind this setting. Exception pushes — sold-with-no-inventory-match,
+# unreconciled payout, attention-needed — always fire regardless.
+LIFECYCLE_SETTING_KEY = "push_lifecycle"
+
+
+def lifecycle_push_enabled() -> bool:
+    """Whether routine per-email lifecycle pushes are enabled (default False)."""
+    try:
+        setting = AppSetting.query.get(LIFECYCLE_SETTING_KEY)
+        return bool(setting and setting.value is not None and float(setting.value) >= 1)
+    except Exception:
+        return False
 
 
 def _sale_label(sale):
@@ -51,19 +66,22 @@ def notify_email_event(gmail_message_id, result):
         dedup_key = f"evt:{gmail_message_id}"
         record_type = result.get("record_type")
         record_id = result.get("record_id")
+        lifecycle_on = lifecycle_push_enabled()
 
         if record_type == "BankTransfer" and record_id:
             transfer = BankTransfer.query.get(record_id)
             if not transfer:
                 return
             amount = _money(transfer.amount_php, "₱")
-            if transfer.reconciliation_status == "Unreconciled":
-                notify_once(dedup_key, f"Payout received: {amount}",
-                            "Couldn't auto-match a sale — reconcile it manually.",
+            if transfer.reconciliation_status != "Reconciled":
+                # EXCEPTION: a payout landed but couldn't auto-match — always push.
+                notify_once(dedup_key, f"Payout unreconciled: {amount}",
+                            "Couldn't auto-match sales to this payout — reconcile it manually.",
                             url="/financial", tag="transfer")
-            else:
-                notify_once(dedup_key, f"Payout received: {amount}",
-                            f"{transfer.bank_name} ····{transfer.account_last4} — auto-reconciled.",
+            elif lifecycle_on:
+                rate = f" at ≈₱{float(transfer.implied_rate):.1f}/$" if transfer.implied_rate else ""
+                notify_once(dedup_key, f"Payout reconciled: {amount}",
+                            f"{transfer.bank_name} ····{transfer.account_last4} — auto-matched{rate}.",
                             url="/financial", tag="transfer")
             return
 
@@ -75,40 +93,49 @@ def notify_email_event(gmail_message_id, result):
         label = _sale_label(sale)
 
         if email_type == "Sale":
-            price = _money(sale.selling_price)
-            notify_once(dedup_key, f"New sale: {label}",
-                        (f"Sold for {price}. " if price else "") + "Confirm within 24h.",
-                        url="/sales", tag="sale")
-        elif email_type == "Confirmation":
-            ship_by = sale.shipment_deadline.strftime("%b %d, %H:%M") if sale.shipment_deadline else None
-            notify_once(dedup_key, f"Confirmed: {label}",
-                        f"Label ready. Ship by {ship_by}." if ship_by else "Label ready.",
-                        url="/labels", tag="sale")
-        elif email_type == "Shipped":
-            notify_once(dedup_key, f"Shipped: {label}",
-                        f"Tracking {sale.tracking_number}." if sale.tracking_number else "Package is on its way to Alias.",
-                        url="/sales", tag="sale")
-        elif email_type == "Completed":
-            amount = _money(sale.amount_made)
-            notify_once(dedup_key, f"Completed: {label}",
-                        f"{amount} available for cash out." if amount else "Earnings available for cash out.",
-                        url="/sales", tag="sale")
-        elif email_type == "BuyerAccepted":
-            amount = _money(sale.amount_made)
-            notify_once(dedup_key, f"Discount accepted: {label}",
-                        f"Payout revised to {amount}." if amount else "Payout was revised down.",
-                        url="/sales", tag="sale")
-        elif email_type == "Cancelled":
-            fee = _money(sale.cancellation_fee)
-            notify_once(dedup_key, f"Cancelled: {label}",
-                        f"Cancellation fee: {fee}." if fee else "No cancellation fee.",
-                        url="/sales", tag="sale")
+            if sale.inventory_match_status != "Matched":
+                # EXCEPTION: sold something with no matching stock — always push.
+                # (Oversell, untracked pair, or missing cost basis.)
+                notify_once(f"nomatch:{sale.sale_id}", f"Sold, no inventory match: {label}",
+                            f"No available stock for SKU {sale.sku or '?'} size {sale.size:g} — "
+                            "add/link inventory or check for an oversell.",
+                            url="/sales", tag="nomatch")
+            elif lifecycle_on:
+                price = _money(sale.selling_price)
+                notify_once(dedup_key, f"New sale: {label}",
+                            (f"Sold for {price}. " if price else "") + "Confirm within 24h.",
+                            url="/sales", tag="sale")
         elif email_type == "Attention":
+            # EXCEPTION: time-critical action — always push.
             deadline = sale.attention_needed_deadline.strftime("%b %d, %H:%M") if sale.attention_needed_deadline else None
             notify_once(dedup_key, f"Needs attention: {label}",
                         (sale.issue_type or "Issue reported")
                         + (f" — respond before {deadline} (auto-discount)." if deadline else " — action required."),
                         url="/sales", tag="attention")
+        elif lifecycle_on and email_type == "Confirmation":
+            ship_by = sale.shipment_deadline.strftime("%b %d, %H:%M") if sale.shipment_deadline else None
+            notify_once(dedup_key, f"Confirmed: {label}",
+                        f"Label ready. Ship by {ship_by}." if ship_by else "Label ready.",
+                        url="/labels", tag="sale")
+        elif lifecycle_on and email_type == "Shipped":
+            notify_once(dedup_key, f"Shipped: {label}",
+                        f"Tracking {sale.tracking_number}." if sale.tracking_number else "Package is on its way to Alias.",
+                        url="/sales", tag="sale")
+        elif lifecycle_on and email_type == "Completed":
+            amount = _money(sale.amount_made)
+            notify_once(dedup_key, f"Completed: {label}",
+                        f"{amount} available for cash out." if amount else "Earnings available for cash out.",
+                        url="/sales", tag="sale")
+        elif lifecycle_on and email_type == "BuyerAccepted":
+            amount = _money(sale.amount_made)
+            notify_once(dedup_key, f"Discount accepted: {label}",
+                        f"Payout revised to {amount}." if amount else "Payout was revised down.",
+                        url="/sales", tag="sale")
+        elif lifecycle_on and email_type == "Cancelled":
+            fee = _money(sale.cancellation_fee)
+            notify_once(dedup_key, f"Cancelled: {label}",
+                        f"Cancellation fee: {fee}." if fee else "No cancellation fee.",
+                        url="/sales", tag="sale")
     except Exception:
         logger.exception("notify_email_event failed")
 
@@ -147,8 +174,23 @@ def check_alert_pushes():
                     notify_once(f"attn6:{item['sale_id']}",
                                 "Auto-discount in under 6h",
                                 item["message"], url="/sales", tag="attention")
-            # Tier 3 alert types (unreconciled_transfer, unmatched_sale,
-            # consignment_expiry) stay dashboard-only for now.
+            # --- Derived-exception pushes: signals only aCount can compute ---
+            elif alert_type == "sold_at_loss":
+                notify_once(f"loss:{item['sale_id']}",
+                            "Sold at a loss",
+                            item["message"], url="/sales", tag="loss")
+            elif alert_type == "earnings_awaiting_payout":
+                # Re-fires only when the backlog changes materially (count +
+                # rounded total in the key), so a steady backlog won't spam.
+                key = f"await:{item['sale_count']}:{int(item['est_total_php'])}"
+                notify_once(key, "Earnings awaiting payout",
+                            item["message"], url="/financial", tag="payout")
+            elif alert_type == "unmatched_sale":
+                notify_once(f"nomatch7:{item['sale_id']}",
+                            "Sale still has no inventory match",
+                            item["message"], url="/sales", tag="nomatch")
+            # unreconciled_transfer / consignment_expiry stay dashboard-only
+            # (the unreconciled payout already pushed once at ingest).
         prune_sent_log()
     except Exception:
         logger.exception("check_alert_pushes failed")

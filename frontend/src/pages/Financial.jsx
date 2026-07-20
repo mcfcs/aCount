@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import TopBar from '../components/layout/TopBar'
 import KPICard from '../components/common/KPICard'
@@ -12,6 +12,7 @@ import {
   getExpenses, getExpensesSummary, createExpense, updateExpense, deleteExpense, deleteBankTransfer,
   getSubscriptions, createSubscription, updateSubscription, deleteSubscription,
   getTransferSuggestions, addTransferAllocation, autoReconcileTransfers,
+  reconcileTransferBatch, removeTransferAllocation,
 } from '../services/api'
 
 function formatPHP(value) {
@@ -80,6 +81,7 @@ function BankTransfersTab() {
   const [allocBusy, setAllocBusy] = useState(false)
   const [autoBusy, setAutoBusy] = useState(false)
   const [autoResult, setAutoResult] = useState(null)
+  const [expandedId, setExpandedId] = useState(null)
   const phpRate = usePhpEstimateRate()
 
   const fetchData = useCallback(async () => {
@@ -151,44 +153,35 @@ function BankTransfersTab() {
     setSuggestError(null)
   }
 
-  const allocateSingle = async (sale) => {
+  // Apply the recommended batch — the server recomputes the batch cash-out
+  // (whole unpaid pool or FIFO prefix) and derives the FX rate itself.
+  const applyBatch = async () => {
+    if (!suggestFor) return
+    setAllocBusy(true)
+    setSuggestError(null)
+    try {
+      await reconcileTransferBatch(suggestFor.transfer_id)
+      closeSuggestions()
+      fetchData()
+    } catch (err) {
+      setSuggestError(err?.response?.data?.error || 'Batch reconcile failed')
+    } finally {
+      setAllocBusy(false)
+    }
+  }
+
+  // Manual fallback: allocate a single sale's estimated PHP value.
+  const allocateManual = async (sale) => {
     if (!suggestFor) return
     setAllocBusy(true)
     setSuggestError(null)
     try {
       await addTransferAllocation(suggestFor.transfer_id, {
         sale_id: sale.sale_id,
-        allocated_amount: suggestFor.amount_php,
+        allocated_amount: sale.est_php,
       })
-      closeSuggestions()
-      fetchData()
-    } catch (err) {
-      setSuggestError(err?.response?.data?.errors?.join(', ') || err?.response?.data?.error || 'Allocation failed')
-    } finally {
-      setAllocBusy(false)
-    }
-  }
-
-  const allocateCombo = async (combo) => {
-    if (!suggestFor) return
-    setAllocBusy(true)
-    setSuggestError(null)
-    try {
-      // Split the transfer across the combo's sales proportionally to their
-      // estimated PHP value (backend recomputes status from the allocations).
-      const shares = combo.sale_ids.map((saleId) => ({
-        sale_id: saleId,
-        est: suggestions?.singles?.find(s => s.sale_id === saleId)?.est_php
-          ?? (combo.est_php / combo.sale_ids.length),
-      }))
-      const estSum = shares.reduce((s, x) => s + x.est, 0) || 1
-      for (const share of shares) {
-        await addTransferAllocation(suggestFor.transfer_id, {
-          sale_id: share.sale_id,
-          allocated_amount: Math.round((suggestFor.amount_php * share.est / estSum) * 100) / 100,
-        })
-      }
-      closeSuggestions()
+      const updated = await getTransferSuggestions(suggestFor.transfer_id)
+      setSuggestions(updated)
       fetchData()
     } catch (err) {
       setSuggestError(err?.response?.data?.errors?.join(', ') || err?.response?.data?.error || 'Allocation failed')
@@ -255,7 +248,7 @@ function BankTransfersTab() {
         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
           {autoResult && (
             <span className="self-center text-xs text-gray-500">
-              Auto-matched {(autoResult.reconciled_single || 0) + (autoResult.reconciled_pair || 0)} of {autoResult.scanned} — {autoResult.still_unreconciled} left for manual review
+              Reconciled {autoResult.reconciled || 0} of {autoResult.scanned} payouts ({autoResult.sales_allocated || 0} sales) — {autoResult.still_unreconciled} left for manual review
             </span>
           )}
           <button onClick={handleAutoReconcile} disabled={autoBusy}
@@ -276,34 +269,70 @@ function BankTransfersTab() {
             <table className="w-full text-xs sm:text-sm">
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
-                  {['Transfer Date','Bank','Account Last 4','Amount (PHP)','Status',''].map(col => (
-                    <th key={col} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
+                  {['Transfer Date','Bank','Account Last 4','Amount (PHP)','Status','Settled',''].map((col, i) => (
+                    <th key={col || i} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400">{col}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {transfers.map((t, idx) => (
-                  <tr key={t.transfer_id || idx} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(t.transfer_date)}</td>
-                    <td className="px-4 py-3 text-gray-700">{t.bank_name || '—'}</td>
-                    <td className="px-4 py-3 font-mono text-gray-600">{t.account_last4 || '—'}</td>
-                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPHP(t.amount_php)}</td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${TRANSFER_STATUS_STYLES[t.reconciliation_status] || 'bg-gray-100 text-gray-600'}`}>
-                        {t.reconciliation_status || '—'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        {t.reconciliation_status !== 'Reconciled' && (
-                          <button onClick={() => openSuggestions(t)} className="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Reconcile</button>
-                        )}
-                        <button onClick={() => openEdit(t)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
-                        <button onClick={() => handleDelete(t)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {transfers.map((t, idx) => {
+                  const allocs = t.allocations || []
+                  const expandable = allocs.length > 0
+                  const isOpen = expandedId === t.transfer_id
+                  return (
+                    <Fragment key={t.transfer_id || idx}>
+                      <tr className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(t.transfer_date)}</td>
+                        <td className="px-4 py-3 text-gray-700">{t.bank_name || '—'}</td>
+                        <td className="px-4 py-3 font-mono text-gray-600">{t.account_last4 || '—'}</td>
+                        <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPHP(t.amount_php)}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${TRANSFER_STATUS_STYLES[t.reconciliation_status] || 'bg-gray-100 text-gray-600'}`}>
+                            {t.reconciliation_status || '—'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-gray-500">
+                          {expandable ? (
+                            <button onClick={() => setExpandedId(isOpen ? null : t.transfer_id)}
+                              className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-indigo-600">
+                              <span className={`transition-transform ${isOpen ? 'rotate-90' : ''}`}>▸</span>
+                              {allocs.length} sale{allocs.length === 1 ? '' : 's'}
+                              {t.implied_rate ? <span className="text-gray-400"> @ ₱{t.implied_rate.toFixed(1)}/$</span> : null}
+                            </button>
+                          ) : '—'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            {t.reconciliation_status !== 'Reconciled' && (
+                              <button onClick={() => openSuggestions(t)} className="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Reconcile</button>
+                            )}
+                            <button onClick={() => openEdit(t)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                            <button onClick={() => handleDelete(t)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                          </div>
+                        </td>
+                      </tr>
+                      {isOpen && expandable && (
+                        <tr className="bg-gray-50/60">
+                          <td colSpan={7} className="px-4 py-3">
+                            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                              Sales settled by this payout{t.implied_rate ? ` · implied rate ≈ ₱${t.implied_rate.toFixed(2)}/$` : ''}
+                            </p>
+                            <div className="space-y-1">
+                              {allocs.map((a) => (
+                                <div key={a.allocation_id} className="flex items-center justify-between gap-3 rounded border border-gray-100 bg-white px-3 py-1.5">
+                                  <span className="min-w-0 truncate text-gray-700">#{a.order_number} — {a.shoe_name}</span>
+                                  <span className="shrink-0 text-gray-500">
+                                    {a.amount_usd != null && <>${a.amount_usd.toFixed(2)} → </>}{formatPHP(a.allocated_amount)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -318,23 +347,55 @@ function BankTransfersTab() {
             {suggestions && (
               <>
                 <p className="text-xs text-gray-500">
-                  Estimates use USD→PHP ≈ {suggestions.rate_used}. {suggestions.candidates_in_window} unallocated completed sale{suggestions.candidates_in_window === 1 ? '' : 's'} in the 60-day window.
+                  A payout settles a batch of completed sales; the USD→PHP rate is derived from the payout itself.
+                  {' '}{suggestions.candidates_in_window} unpaid completed sale{suggestions.candidates_in_window === 1 ? '' : 's'} in the window.
                 </p>
 
-                {suggestions.singles?.length > 0 && (
+                {suggestions.batch ? (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-emerald-800">
+                          Recommended batch — {suggestions.batch.sale_count} sale{suggestions.batch.sale_count === 1 ? '' : 's'}
+                        </p>
+                        <p className="text-xs text-emerald-700">
+                          ${suggestions.batch.total_usd.toFixed(2)} earnings · implied rate ≈ ₱{Number(suggestions.batch.implied_rate).toFixed(2)}/$ · {suggestions.batch.reason}
+                        </p>
+                      </div>
+                      <button onClick={applyBatch} disabled={allocBusy}
+                        className="shrink-0 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+                        {allocBusy ? 'Reconciling…' : `Reconcile ${suggestions.batch.sale_count} sale${suggestions.batch.sale_count === 1 ? '' : 's'}`}
+                      </button>
+                    </div>
+                    <div className="max-h-52 space-y-1 overflow-y-auto">
+                      {suggestions.batch.sales.map((s) => (
+                        <div key={s.sale_id} className="flex items-center justify-between gap-3 rounded border border-emerald-100 bg-white px-3 py-1.5">
+                          <span className="min-w-0 truncate text-xs text-gray-700">#{s.order_number} — {s.shoe_name}</span>
+                          <span className="shrink-0 text-xs text-gray-500">${s.amount_usd.toFixed(2)} → {formatPHP(s.est_php)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+                    No confident batch — the unpaid sales don't add up to this payout at a sane FX rate. It may be a partial cash-out, or some sales aren't ingested yet. Allocate manually below, or adjust the USD→PHP estimate in Settings.
+                  </p>
+                )}
+
+                {suggestions.manual_candidates?.length > 0 && (
                   <div>
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Closest single sales</p>
-                    <div className="space-y-2">
-                      {suggestions.singles.map((s) => (
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Manual — unpaid completed sales</p>
+                    <div className="max-h-52 space-y-2 overflow-y-auto">
+                      {suggestions.manual_candidates.map((s) => (
                         <div key={s.sale_id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
                           <div className="min-w-0">
                             <p className="truncate text-sm text-gray-800">#{s.order_number} — {s.shoe_name}</p>
                             <p className="text-xs text-gray-500">
-                              ${s.amount_usd.toFixed(2)} ≈ {formatPHP(s.est_php)} · off by {s.diff_pct}%
-                              {s.implied_rate != null && <> · implies rate {s.implied_rate}</>} · completed {formatDate(s.completion_date)}
+                              ${s.amount_usd.toFixed(2)} ≈ {formatPHP(s.est_php)}
+                              {s.implied_rate != null && <> · this sale alone implies ₱{s.implied_rate}/$</>}
                             </p>
                           </div>
-                          <button onClick={() => allocateSingle(s)} disabled={allocBusy}
+                          <button onClick={() => allocateManual(s)} disabled={allocBusy}
                             className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
                             Allocate
                           </button>
@@ -342,44 +403,6 @@ function BankTransfersTab() {
                       ))}
                     </div>
                   </div>
-                )}
-
-                {(suggestions.pairs?.length > 0 || suggestions.greedy_combo) && (
-                  <div>
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Batched payout combos</p>
-                    <div className="space-y-2">
-                      {(suggestions.pairs || []).map((combo, idx) => (
-                        <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm text-gray-800">Orders {combo.order_numbers.map(o => `#${o}`).join(' + ')}</p>
-                            <p className="text-xs text-gray-500">≈ {formatPHP(combo.est_php)} · off by {combo.diff_pct}%</p>
-                          </div>
-                          <button onClick={() => allocateCombo(combo)} disabled={allocBusy}
-                            className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
-                            Allocate pair
-                          </button>
-                        </div>
-                      ))}
-                      {suggestions.greedy_combo && (
-                        <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm text-gray-800">{suggestions.greedy_combo.sale_ids.length} sales batch</p>
-                            <p className="text-xs text-gray-500">≈ {formatPHP(suggestions.greedy_combo.est_php)} · off by {suggestions.greedy_combo.diff_pct}%</p>
-                          </div>
-                          <button onClick={() => allocateCombo(suggestions.greedy_combo)} disabled={allocBusy}
-                            className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
-                            Allocate batch
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {!suggestions.singles?.length && !suggestions.pairs?.length && !suggestions.greedy_combo && (
-                  <p className="text-sm text-gray-600">
-                    No close matches found with the current estimate rate. This payout likely covers several sales — allocate it manually from the sales list, or adjust the USD→PHP rate in Settings if it's far from Alias's actual rate.
-                  </p>
                 )}
               </>
             )}
@@ -428,7 +451,9 @@ function BankTransfersTab() {
 // ─── Expenses ─────────────────────────────────────────────────────────────────
 
 const EXPENSE_COLORS = ['#6366f1','#22c55e','#3b82f6','#f59e0b','#ef4444','#a855f7','#14b8a6','#f97316','#64748b']
-const EXPENSE_CATEGORIES = ['Platform Fee','Shipping','Storage','Supplies','Subscription','Other']
+// Must stay in sync with VALID_CATEGORIES in app/routes/expenses.py — the
+// backend 422-rejects anything outside this set.
+const EXPENSE_CATEGORIES = ['Platform Fee','Sneaker Purchase','Personal Order','Subscription','Shipping','Storage','Supplies','Other']
 const EXPENSE_CSV_COLUMNS = [
   { key: 'expense_date', label: 'Expense Date' },
   { key: 'category', label: 'Category' },
@@ -450,6 +475,7 @@ function ExpensesTab() {
   const [form, setForm] = useState(EMPTY_EXPENSE)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
+  const [detailFor, setDetailFor] = useState(null)
 
   const fetchData = useCallback(async () => {
     setLoading(true); setError(null)
@@ -583,11 +609,16 @@ function ExpensesTab() {
                     <td className="px-4 py-3">
                       <span className="inline-flex rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">{exp.category || '—'}</span>
                     </td>
-                    <td className="px-4 py-3 text-gray-700 max-w-xs truncate">{exp.description || '—'}</td>
+                    <td className="px-4 py-3 text-gray-700 max-w-xs truncate">
+                      <button onClick={() => setDetailFor(exp)} className="text-left hover:text-indigo-600 hover:underline truncate max-w-full" title="View details">
+                        {exp.description || '—'}
+                      </button>
+                    </td>
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPHP(exp.amount_php)}</td>
                     <td className="px-4 py-3 text-gray-500">{exp.source || '—'}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
+                        <button onClick={() => setDetailFor(exp)} className="text-xs text-gray-500 hover:text-gray-700 font-medium">View</button>
                         <button onClick={() => openEdit(exp)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
                         <button onClick={() => handleDelete(exp)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
                       </div>
@@ -599,6 +630,60 @@ function ExpensesTab() {
           </div>
         )}
       </div>
+
+      {detailFor && (
+        <Modal title="Expense Details" onClose={() => setDetailFor(null)}>
+          <div className="space-y-4 text-sm">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs font-medium text-gray-500">Category</p>
+                <span className="mt-1 inline-flex rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">{detailFor.category || '—'}</span>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-gray-500">Amount (PHP)</p>
+                <p className="mt-1 font-semibold text-gray-800">{formatPHP(detailFor.amount_php)}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-gray-500">Date</p>
+                <p className="mt-1 text-gray-700">{formatDate(detailFor.expense_date)}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-gray-500">Source</p>
+                <p className="mt-1 text-gray-700">{detailFor.source || '—'}</p>
+              </div>
+              {detailFor.original_currency && detailFor.original_currency !== 'PHP' && (
+                <div>
+                  <p className="text-xs font-medium text-gray-500">Original</p>
+                  <p className="mt-1 text-gray-700">{detailFor.original_currency} {detailFor.amount_original}{detailFor.conversion_rate ? ` @ ${detailFor.conversion_rate}` : ''}</p>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-gray-500">Item / Description</p>
+              <p className="mt-1 text-gray-800">{detailFor.description || '—'}</p>
+            </div>
+
+            {detailFor.notes && (
+              <div>
+                <p className="text-xs font-medium text-gray-500">Order breakdown</p>
+                <pre className="mt-1 whitespace-pre-wrap rounded-lg border border-gray-100 bg-gray-50 p-3 text-xs text-gray-700 font-sans">{detailFor.notes}</pre>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-2">
+              {detailFor.gmail_url ? (
+                <a href={detailFor.gmail_url} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100">
+                  Open original email ↗
+                </a>
+              ) : <span />}
+              <button onClick={() => { const e = detailFor; setDetailFor(null); openEdit(e) }}
+                className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-indigo-700">Edit</button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {modalOpen && (
         <Modal title={editing ? 'Edit Expense' : 'Add Expense'} onClose={() => setModalOpen(false)}>

@@ -90,6 +90,41 @@ def set_php_rate():
         return jsonify({"error": f"Failed to save PHP estimate rate: {str(exc)}"}), 500
 
 
+PUSH_LIFECYCLE_SETTING_KEY = "push_lifecycle"
+
+
+@settings_bp.get("/push-prefs")
+def get_push_prefs():
+    """GET /api/settings/push-prefs — notification preferences.
+
+    `lifecycle_push`: whether routine per-email pushes (new sale / confirmed /
+    shipped / …) fire. Off by default; exception pushes (sold-with-no-inventory,
+    unreconciled payout, attention, deadlines, sold-at-a-loss) always fire.
+    """
+    setting = AppSetting.query.get(PUSH_LIFECYCLE_SETTING_KEY)
+    enabled = bool(setting and setting.value is not None and float(setting.value) >= 1)
+    return jsonify({"lifecycle_push": enabled}), 200
+
+
+@settings_bp.put("/push-prefs")
+def set_push_prefs():
+    """PUT /api/settings/push-prefs  Body: { "lifecycle_push": true|false }"""
+    data = request.get_json(silent=True) or {}
+    value = 1 if data.get("lifecycle_push") else 0
+    try:
+        setting = AppSetting.query.get(PUSH_LIFECYCLE_SETTING_KEY)
+        if setting is None:
+            setting = AppSetting(key=PUSH_LIFECYCLE_SETTING_KEY, value=value)
+            db.session.add(setting)
+        else:
+            setting.value = value
+        db.session.commit()
+        return jsonify({"lifecycle_push": bool(value)}), 200
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to save push preferences: {str(exc)}"}), 500
+
+
 @settings_bp.post("/reset")
 def reset_database():
     """

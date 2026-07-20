@@ -4,6 +4,7 @@ import TopBar from '../components/layout/TopBar'
 import {
   scrapeEmails, resetDatabase,
   getPushStatus, getPushPublicKey, subscribePush, unsubscribePush, sendTestPush,
+  getPushPrefs, setPushPrefs,
 } from '../services/api'
 import { readPhpEstimateRate, writePhpEstimateRate } from '../utils/exchangeRate'
 
@@ -73,15 +74,31 @@ function PushNotificationsCard() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
+  const [lifecycleOn, setLifecycleOn] = useState(false)
+  const [prefBusy, setPrefBusy] = useState(false)
 
   useEffect(() => {
     getPushStatus().then(setServerStatus).catch(() => setServerStatus(null))
+    getPushPrefs().then((p) => setLifecycleOn(Boolean(p?.lifecycle_push))).catch(() => {})
     if (!supported) return
     navigator.serviceWorker.ready
       .then((reg) => reg.pushManager.getSubscription())
       .then((sub) => setSubscribed(Boolean(sub)))
       .catch(() => {})
   }, [supported])
+
+  const toggleLifecycle = async (next) => {
+    setPrefBusy(true)
+    setError('')
+    try {
+      const res = await setPushPrefs({ lifecycle_push: next })
+      setLifecycleOn(Boolean(res?.lifecycle_push))
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Could not save notification preference.')
+    } finally {
+      setPrefBusy(false)
+    }
+  }
 
   const enable = async () => {
     setBusy(true)
@@ -148,10 +165,28 @@ function PushNotificationsCard() {
   return (
     <Card title="Push Notifications">
       <p className="text-sm leading-relaxed text-gray-600">
-        Get notified about new sales, confirmations with ship-by deadlines, completed cash-outs,
-        payouts, and time-critical alerts (attention-needed 48h timer, shipment deadlines) — even
-        when the app is closed. Enable per device; on iPhone, add the app to the Home Screen first.
+        aCount pushes <strong>exceptions only</strong> by default — things no other app can tell you:
+        a sale with no matching inventory, a sale set to close at a loss, a payout that wouldn't
+        auto-reconcile, earnings awaiting payout, and time-critical deadlines (attention-needed 48h
+        timer, shipment deadlines). Enable per device; on iPhone, add the app to the Home Screen first.
       </p>
+
+      <label className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
+        <input
+          type="checkbox"
+          checked={lifecycleOn}
+          disabled={prefBusy}
+          onChange={(e) => toggleLifecycle(e.target.checked)}
+          className="mt-0.5"
+        />
+        <span className="text-sm text-gray-700">
+          <span className="font-medium">Also send routine lifecycle notifications</span>
+          <span className="block text-xs text-gray-500">
+            New sale / confirmed / shipped / completed / cancelled — one per email. Off by default
+            because Alias and Gmail already notify these. {prefBusy && '· saving…'}
+          </span>
+        </span>
+      </label>
       {!supported && diag.reasons.map((reason) => (
         <StatusPill key={reason} tone="red">{reason}</StatusPill>
       ))}

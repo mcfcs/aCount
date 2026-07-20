@@ -55,6 +55,8 @@ export const sendTestPush = () => client.post('/push/test').then(r => r.data)
 // Bank Transfers
 export const getTransferSuggestions = (id) => client.get(`/bank-transfers/${id}/suggestions`).then(r => r.data)
 export const addTransferAllocation = (id, data) => client.post(`/bank-transfers/${id}/allocations`, data).then(r => r.data)
+export const removeTransferAllocation = (id, allocId) => client.delete(`/bank-transfers/${id}/allocations/${allocId}`).then(r => r.data)
+export const reconcileTransferBatch = (id) => client.post(`/bank-transfers/${id}/reconcile`).then(r => r.data)
 export const autoReconcileTransfers = () => client.post('/bank-transfers/auto-reconcile').then(r => r.data)
 export const getBankTransfers = (params = {}) => client.get('/bank-transfers', { params }).then(r => r.data)
 export const getBankTransfersSummary = () => client.get('/bank-transfers/summary').then(r => r.data)
@@ -92,5 +94,7 @@ export const cancelScrape = () => client.post('/gmail/scrape-cancel').then(r => 
 export const resetDatabase = (payload) => client.post('/settings/reset', payload).then(r => r.data)
 export const getPhpRate = () => client.get('/settings/php-rate').then(r => r.data)
 export const setPhpRate = (payload) => client.put('/settings/php-rate', payload).then(r => r.data)
+export const getPushPrefs = () => client.get('/settings/push-prefs').then(r => r.data)
+export const setPushPrefs = (payload) => client.put('/settings/push-prefs', payload).then(r => r.data)
 
 export default client

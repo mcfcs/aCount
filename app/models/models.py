@@ -298,22 +298,31 @@ class BankTransfer(db.Model):
         nullable=False,
         default="Unreconciled",
     )  # Reconciled | Partially Reconciled | Unreconciled
+    # USD→PHP rate DERIVED from this payout when it was batch-reconciled
+    # (amount_php ÷ Σ settled-sale USD earnings). Self-calibrating — no need to
+    # guess Alias's cash-out FX rate.
+    implied_rate          = db.Column(db.Numeric(10, 4), nullable=True)
     notes                 = db.Column(db.Text, nullable=True)
     created_at            = db.Column(db.DateTime, nullable=False, default=now)
 
     allocations = db.relationship("BankTransferAllocation", backref="bank_transfer", cascade="all, delete-orphan")
 
-    def to_dict(self):
-        return {
+    def to_dict(self, with_allocations=False):
+        data = {
             "transfer_id": self.transfer_id,
             "amount_php": float(self.amount_php),
             "bank_name": self.bank_name,
             "account_last4": self.account_last4,
             "transfer_date": self.transfer_date.isoformat() if self.transfer_date else None,
             "reconciliation_status": self.reconciliation_status,
+            "implied_rate": float(self.implied_rate) if self.implied_rate is not None else None,
             "notes": self.notes,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+        if with_allocations:
+            data["allocations"] = [a.to_dict() for a in self.allocations]
+            data["sale_count"] = len(self.allocations)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +339,8 @@ class BankTransferAllocation(db.Model):
     allocation_id    = db.Column(db.Integer, primary_key=True, autoincrement=True)
     transfer_id      = db.Column(db.Integer, db.ForeignKey("bank_transfers.transfer_id", ondelete="CASCADE"), nullable=False)
     sale_id          = db.Column(db.Integer, db.ForeignKey("sales.sale_id", ondelete="CASCADE"), nullable=False)
-    allocated_amount = db.Column(db.Numeric(12, 2), nullable=False)  # PHP
+    allocated_amount = db.Column(db.Numeric(12, 2), nullable=False)  # PHP (derived from amount_usd × transfer rate)
+    amount_usd       = db.Column(db.Numeric(12, 2), nullable=True)   # the sale's USD earnings this payout settled
 
     sale = db.relationship("Sale", backref="transfer_allocations")
 
@@ -340,6 +350,10 @@ class BankTransferAllocation(db.Model):
             "transfer_id": self.transfer_id,
             "sale_id": self.sale_id,
             "allocated_amount": float(self.allocated_amount),
+            "amount_usd": float(self.amount_usd) if self.amount_usd is not None else None,
+            "order_number": self.sale.order_number if self.sale else None,
+            "shoe_name": self.sale.shoe_name if self.sale else None,
+            "completion_date": self.sale.completion_date.isoformat() if self.sale and self.sale.completion_date else None,
         }
 
 
@@ -356,7 +370,8 @@ class Expense(db.Model):
 
     expense_id        = db.Column(db.Integer, primary_key=True, autoincrement=True)
     category          = db.Column(db.String(30), nullable=False)
-    # Platform Fee | Subscription | Personal Order | Sneaker Purchase | Other
+    # Platform Fee | Sneaker Purchase | Personal Order | Subscription |
+    # Shipping | Storage | Supplies | Other
     description       = db.Column(db.String(500), nullable=False)
     amount_original   = db.Column(db.Numeric(10, 2), nullable=False)
     original_currency = db.Column(db.String(3), nullable=False, default="PHP")
@@ -365,12 +380,18 @@ class Expense(db.Model):
     expense_date      = db.Column(db.Date, nullable=False)
     source            = db.Column(db.String(255), nullable=True)
     linked_sale_id    = db.Column(db.Integer, db.ForeignKey("sales.sale_id", ondelete="SET NULL"), nullable=True)
+    # Gmail message id of the source email (merchant charges), so the detail
+    # view can deep-link to the original receipt / re-parse it on demand.
+    gmail_message_id  = db.Column(db.String(255), nullable=True)
     notes             = db.Column(db.Text, nullable=True)
     created_at        = db.Column(db.DateTime, nullable=False, default=now)
 
     linked_sale = db.relationship("Sale", backref="expenses", foreign_keys=[linked_sale_id])
 
-    VALID_CATEGORIES = ("Platform Fee", "Subscription", "Personal Order", "Sneaker Purchase", "Other")
+    VALID_CATEGORIES = (
+        "Platform Fee", "Sneaker Purchase", "Personal Order", "Subscription",
+        "Shipping", "Storage", "Supplies", "Other",
+    )
 
     def to_dict(self):
         return {
@@ -384,6 +405,8 @@ class Expense(db.Model):
             "expense_date": self.expense_date.isoformat() if self.expense_date else None,
             "source": self.source,
             "linked_sale_id": self.linked_sale_id,
+            "gmail_message_id": self.gmail_message_id,
+            "gmail_url": f"https://mail.google.com/mail/u/0/#all/{self.gmail_message_id}" if self.gmail_message_id else None,
             "notes": self.notes,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

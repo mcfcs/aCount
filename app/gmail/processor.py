@@ -138,7 +138,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
     status = "Success"
 
     try:
-        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image, shipping_label_url=shipping_label_url, sender=sender)
+        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image, shipping_label_url=shipping_label_url, sender=sender, gmail_message_id=gmail_message_id)
         if result:
             record_type, record_id = result
     except Exception as e:
@@ -171,7 +171,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
 # Dispatch table
 # =============================================================================
 
-def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None, shipping_label_url=None, sender=""):
+def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None, shipping_label_url=None, sender="", gmail_message_id=None):
     """Route to the correct handler. Returns (record_type, record_id) or None."""
 
     if email_type == "Sale":
@@ -222,13 +222,13 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_
         data = parsers.parse_payment_amount(subject, body)
         data["merchant"] = parsers.parse_merchant(sender)
         parsed_data.update(data)
-        return _handle_subscription_charge(data, subject, sent_at=sent_at)
+        return _handle_subscription_charge(data, subject, sent_at=sent_at, body=body, gmail_message_id=gmail_message_id)
 
     elif email_type in ("Purchase", "Receipt"):
         data = parsers.parse_payment_amount(subject, body)
         data["merchant"] = parsers.parse_merchant(sender)
         parsed_data.update(data)
-        return _handle_merchant_purchase(data, subject, sent_at=sent_at)
+        return _handle_merchant_purchase(data, subject, sent_at=sent_at, body=body, gmail_message_id=gmail_message_id)
 
     elif email_type == "Other":
         return None
@@ -652,7 +652,7 @@ def _month_after(d: date) -> date:
         return d.replace(year=year, month=month, day=28)
 
 
-def _handle_merchant_charge(data: dict, subject: str, sent_at=None):
+def _handle_merchant_charge(data: dict, subject: str, sent_at=None, body="", gmail_message_id=None):
     """
     Non-Alias merchant email (Shopee, Netflix, Grab, ...). Creates an Expense
     only when the SUBJECT reads like an actual transaction record
@@ -661,6 +661,10 @@ def _handle_merchant_charge(data: dict, subject: str, sent_at=None):
     the subject (invoice/renewal → Subscription, which also updates the
     Subscription tracker; sneaker merchants → Sneaker Purchase; else
     Personal Order).
+
+    The description is the parsed line item(s) ("adidas Bw Army Shoes …"), not
+    the email subject; the subject/breakdown go in notes, and the Gmail message
+    id is stored so the detail view can open the original receipt.
     """
     if not parsers.looks_like_charge_email(subject):
         logger.info(f"Merchant email rejected as promo/notice (no charge evidence): {str(subject)[:80]!r}")
@@ -674,23 +678,38 @@ def _handle_merchant_charge(data: dict, subject: str, sent_at=None):
     expense_date = (sent_at or now()).date()
     amount_original, currency, amount_php, conversion_rate = _expense_amounts(data)
 
-    # Dedup: same merchant + category + amount on the same day.
+    items = parsers.parse_order_items(body)
+    description = parsers.summarize_items(items) or str(subject or f"{merchant} charge")[:500]
+    snippet = parsers.build_charge_snippet(subject, body, items)
+    notes = snippet or str(subject or "")[:1000]
+
+    # Dedup: same merchant + category + amount on the same day. Update the item
+    # description / notes / message id in place (re-scrapes with the improved
+    # parser should enrich the existing row, not spawn a duplicate).
     existing = Expense.query.filter_by(
         category=category, source=merchant, expense_date=expense_date,
     ).filter(Expense.amount_original == amount_original).first()
     if existing:
+        if items and existing.description != description:
+            existing.description = description
+        if snippet:
+            existing.notes = notes
+        if gmail_message_id and not existing.gmail_message_id:
+            existing.gmail_message_id = gmail_message_id
+        db.session.commit()
         return "Expense", existing.expense_id
 
     expense = Expense(
         category=category,
-        description=str(subject or f"{merchant} charge")[:500],
+        description=description,
         amount_original=amount_original,
         original_currency=currency,
         amount_php=amount_php,
         conversion_rate=conversion_rate,
         expense_date=expense_date,
         source=merchant,
-        notes=str(subject or "")[:500],
+        gmail_message_id=gmail_message_id,
+        notes=notes,
     )
     db.session.add(expense)
 
@@ -720,12 +739,12 @@ def _handle_merchant_charge(data: dict, subject: str, sent_at=None):
 
 
 # Backwards-compatible names used by the dispatcher and backfill.
-def _handle_subscription_charge(data: dict, subject: str, sent_at=None):
-    return _handle_merchant_charge(data, subject, sent_at=sent_at)
+def _handle_subscription_charge(data: dict, subject: str, sent_at=None, body="", gmail_message_id=None):
+    return _handle_merchant_charge(data, subject, sent_at=sent_at, body=body, gmail_message_id=gmail_message_id)
 
 
-def _handle_merchant_purchase(data: dict, subject: str, sent_at=None):
-    return _handle_merchant_charge(data, subject, sent_at=sent_at)
+def _handle_merchant_purchase(data: dict, subject: str, sent_at=None, body="", gmail_message_id=None):
+    return _handle_merchant_charge(data, subject, sent_at=sent_at, body=body, gmail_message_id=gmail_message_id)
 
 
 def _handle_bank_transfer(data: dict, sent_at=None):
@@ -779,9 +798,11 @@ def _handle_bank_transfer(data: dict, sent_at=None):
     return "BankTransfer", transfer.transfer_id
 
 
-def _unallocated_completed_sales(before_date, window_days=45):
-    """Completed sales in the window before `before_date` that have earnings
-    and are not yet allocated to any transfer."""
+def _unallocated_completed_sales(before_date, window_days=120):
+    """Completed sales with earnings, not yet allocated to any transfer, that
+    could belong to a payout on `before_date` — i.e. the 'unpaid earnings pool'.
+    Ordered oldest-completed first (FIFO: a cash-out settles the oldest
+    outstanding earnings first)."""
     window_start = (before_date - timedelta(days=window_days)).date()
     already_allocated_ids = {
         row[0] for row in db.session.query(BankTransferAllocation.sale_id).all()
@@ -793,129 +814,146 @@ def _unallocated_completed_sales(before_date, window_days=45):
         .filter(Sale.completion_date >= window_start)
         .filter(Sale.completion_date <= before_date.date())
         .filter(Sale.amount_made != None)  # noqa: E711
+        .order_by(Sale.completion_date.asc(), Sale.sale_id.asc())
         .all()
     )
     return [s for s in candidates if s.sale_id not in already_allocated_ids]
 
 
-def _auto_reconcile_transfer(transfer: BankTransfer):
-    """
-    Match a transfer to Completed sales by AMOUNT, not just date proximity.
+# A payout's derived USD→PHP rate must land in this band to be trusted. Alias
+# cash-out FX drifts around the mid-50s; the band absorbs that drift while
+# rejecting a batch whose implied rate is nonsensical (wrong sale set).
+RECONCILE_RATE_BAND = (45.0, 65.0)
 
-    Sales earn USD (`amount_made`); the payout arrives in PHP, so candidates
-    are compared via the configured USD→PHP estimate rate. Auto-allocation is
-    deliberately conservative — it only fires when exactly ONE sale matches
-    within ±2% and no second sale is even within ±5% (payouts covering several
-    sales are left for manual reconciliation, aided by the
-    /api/bank-transfers/<id>/suggestions endpoint).
+
+def _fifo_prefix(sales_asc, target_php, est_rate, tol=0.10):
+    """Oldest-first prefix of `sales_asc` whose cumulative USD × est_rate is
+    closest to `target_php` (a partial cash-out settles the oldest earnings
+    first). Returns the best prefix within `tol`, else None."""
+    best, best_diff, cum = None, None, 0.0
+    running = []
+    for sale in sales_asc:
+        cum += float(sale.amount_made)
+        running.append(sale)
+        diff = abs(cum * est_rate - target_php) / target_php
+        if best_diff is None or diff < best_diff:
+            best_diff, best = diff, list(running)
+        if cum * est_rate > target_php * (1 + tol):
+            break  # overshoot — a longer prefix only gets worse
+    return best if (best_diff is not None and best_diff <= tol) else None
+
+
+def _compute_transfer_batch(transfer: BankTransfer):
+    """Determine which unpaid completed sales a payout settles — WITHOUT
+    writing anything. Returns (batch, rate, reason).
+
+    A cash-out settles all currently-available earnings, so the batch is
+    deterministic rather than a subset-sum guess:
+      1. Whole unpaid pool, if its implied rate (payout ÷ Σ USD) is sane.
+      2. Else the oldest-first FIFO prefix matching the payout (partial cash-out
+         or some earnings belong to a later payout), if ITS implied rate is sane.
+    The FX rate is DERIVED from the payout, not guessed from Settings.
     """
     from app.utils import get_php_estimate_rate
 
     amount = float(transfer.amount_php)
-    unallocated = _unallocated_completed_sales(transfer.transfer_date)
-    if not unallocated:
-        logger.info(f"BankTransfer {transfer.transfer_id}: no unallocated completed sales — Unreconciled.")
-        return
+    if not amount:
+        return None, None, "zero amount"
 
-    rate = get_php_estimate_rate()
+    unpaid = _unallocated_completed_sales(transfer.transfer_date)
+    if not unpaid:
+        return None, None, "no unpaid completed sales in window"
 
-    def diff_pct(sale):
-        return abs(float(sale.amount_made) * rate - amount) / amount
+    total_usd = sum(float(s.amount_made) for s in unpaid)
+    implied_all = amount / total_usd if total_usd else 0.0
+    if total_usd and RECONCILE_RATE_BAND[0] <= implied_all <= RECONCILE_RATE_BAND[1]:
+        return unpaid, implied_all, "whole-pool"
 
-    tight = [s for s in unallocated if diff_pct(s) <= 0.02]
-    loose = [s for s in unallocated if diff_pct(s) <= 0.05]
+    prefix = _fifo_prefix(unpaid, amount, get_php_estimate_rate())
+    if prefix:
+        prefix_usd = sum(float(s.amount_made) for s in prefix)
+        rate = amount / prefix_usd if prefix_usd else 0.0
+        if RECONCILE_RATE_BAND[0] <= rate <= RECONCILE_RATE_BAND[1]:
+            return prefix, rate, "fifo-prefix"
 
-    match = None
-    if len(tight) == 1 and len(loose) == 1:
-        match = tight[0]
-    elif len(unallocated) == 1 and diff_pct(unallocated[0]) <= 0.10:
-        match = unallocated[0]
+    return None, None, (
+        f"no confident batch (pool={len(unpaid)}, whole-pool rate≈{implied_all:.1f})"
+    )
 
-    if match:
+
+def _allocate_batch(transfer: BankTransfer, batch, rate):
+    """Write allocations for a settled batch, splitting the payout PHP across
+    the sales in proportion to their USD earnings (so allocations sum EXACTLY to
+    the payout), and stamp the derived rate on the transfer."""
+    amount = float(transfer.amount_php)
+    total_usd = sum(float(s.amount_made) for s in batch) or 1.0
+    running = 0.0
+    for i, sale in enumerate(batch):
+        usd = float(sale.amount_made)
+        if i == len(batch) - 1:
+            php = round(amount - running, 2)  # last absorbs the rounding remainder
+        else:
+            php = round(amount * usd / total_usd, 2)
+            running += php
         db.session.add(BankTransferAllocation(
             transfer_id=transfer.transfer_id,
-            sale_id=match.sale_id,
-            allocated_amount=transfer.amount_php,
+            sale_id=sale.sale_id,
+            allocated_amount=php,
+            amount_usd=usd,
         ))
-        transfer.reconciliation_status = "Reconciled"
-        logger.info(
-            f"Auto-reconciled transfer {transfer.transfer_id} → sale_id={match.sale_id} "
-            f"(${float(match.amount_made):.2f} × {rate} ≈ ₱{amount:,.2f})"
-        )
-    else:
-        logger.info(
-            f"BankTransfer {transfer.transfer_id}: {len(unallocated)} candidates, "
-            f"{len(tight)} within 2% — manual reconciliation required."
-        )
+    transfer.implied_rate = round(rate, 4)
+    transfer.reconciliation_status = "Reconciled"
+
+
+def reconcile_transfer_batch(transfer: BankTransfer) -> dict:
+    """Batch-reconcile one transfer against its unpaid-earnings pool. Does NOT
+    commit. Returns a result summary."""
+    batch, rate, reason = _compute_transfer_batch(transfer)
+    if not batch:
+        logger.info(f"BankTransfer {transfer.transfer_id}: {reason} — left Unreconciled.")
+        return {"status": "unreconciled", "reason": reason}
+
+    _allocate_batch(transfer, batch, rate)
+    logger.info(
+        f"Batch-reconciled transfer {transfer.transfer_id} → {len(batch)} sale(s) "
+        f"[{reason}] at implied rate {rate:.2f} (₱{float(transfer.amount_php):,.2f})"
+    )
+    return {
+        "status": "reconciled",
+        "reason": reason,
+        "sale_count": len(batch),
+        "implied_rate": round(rate, 4),
+        "sale_ids": [s.sale_id for s in batch],
+    }
+
+
+def _auto_reconcile_transfer(transfer: BankTransfer):
+    """Batch-reconcile a freshly ingested payout (called by _handle_bank_transfer
+    before commit). Kept for the existing call site."""
+    reconcile_transfer_batch(transfer)
 
 
 def auto_reconcile_all_transfers() -> dict:
-    """Backfill: run amount-aware matching over every Unreconciled transfer,
-    oldest first (so earlier payouts claim their sales before later ones).
-
-    Two conservative rules per transfer:
-    - unique single sale within ±2% (and nothing else within ±5%), or
-    - unique PAIR of sales within ±1.5% when no single is even within ±5%
-      (small batched cash-outs). Ambiguous transfers stay for the
-      suggestions-assisted manual flow.
-    """
-    from app.utils import get_php_estimate_rate
-
-    rate = get_php_estimate_rate()
+    """Run batch reconciliation over every Unreconciled transfer, OLDEST first
+    so earlier payouts claim the oldest unpaid earnings before later ones."""
     transfers = (
         BankTransfer.query
         .filter_by(reconciliation_status="Unreconciled")
         .order_by(BankTransfer.transfer_date.asc())
         .all()
     )
-    reconciled_singles, reconciled_pairs = [], []
-
+    reconciled, total_sales = 0, 0
     for transfer in transfers:
-        amount = float(transfer.amount_php)
-        if not amount:
-            continue
-
-        _auto_reconcile_transfer(transfer)
-        if transfer.reconciliation_status == "Reconciled":
-            db.session.commit()
-            reconciled_singles.append(transfer.transfer_id)
-            continue
-
-        candidates = _unallocated_completed_sales(transfer.transfer_date, window_days=60)
-        singles_5 = [s for s in candidates
-                     if abs(float(s.amount_made) * rate - amount) / amount <= 0.05]
-        if singles_5 or len(candidates) < 2:
-            db.session.commit()
-            continue
-
-        pool = sorted(candidates, key=lambda s: float(s.amount_made), reverse=True)[:120]
-        matching_pairs = []
-        for i in range(len(pool)):
-            for j in range(i + 1, len(pool)):
-                est = (float(pool[i].amount_made) + float(pool[j].amount_made)) * rate
-                if abs(est - amount) / amount <= 0.015:
-                    matching_pairs.append((pool[i], pool[j], est))
-            if len(matching_pairs) > 1:
-                break
-        if len(matching_pairs) == 1:
-            sale_a, sale_b, est = matching_pairs[0]
-            share_a = float(sale_a.amount_made) * rate / est
-            db.session.add(BankTransferAllocation(
-                transfer_id=transfer.transfer_id, sale_id=sale_a.sale_id,
-                allocated_amount=round(amount * share_a, 2)))
-            db.session.add(BankTransferAllocation(
-                transfer_id=transfer.transfer_id, sale_id=sale_b.sale_id,
-                allocated_amount=round(amount * (1 - share_a), 2)))
-            transfer.reconciliation_status = "Reconciled"
-            reconciled_pairs.append(transfer.transfer_id)
-            logger.info(f"Pair-reconciled transfer {transfer.transfer_id} → sales "
-                        f"{sale_a.sale_id}+{sale_b.sale_id}")
+        result = reconcile_transfer_batch(transfer)
+        if result["status"] == "reconciled":
+            reconciled += 1
+            total_sales += result["sale_count"]
         db.session.commit()
 
     return {
         "scanned": len(transfers),
-        "reconciled_single": len(reconciled_singles),
-        "reconciled_pair": len(reconciled_pairs),
+        "reconciled": reconciled,
+        "sales_allocated": total_sales,
         "still_unreconciled": BankTransfer.query.filter_by(reconciliation_status="Unreconciled").count(),
     }
 

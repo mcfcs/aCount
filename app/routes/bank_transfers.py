@@ -95,7 +95,7 @@ def list_transfers():
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
     return jsonify({
-        "items": [t.to_dict() for t in pagination.items],
+        "items": [t.to_dict(with_allocations=True) for t in pagination.items],
         "total": pagination.total,
         "page": pagination.page,
         "per_page": pagination.per_page,
@@ -257,24 +257,26 @@ def auto_reconcile_all():
 def allocation_suggestions(transfer_id):
     """
     GET /api/bank-transfers/<id>/suggestions
-    Ranked candidate sales for reconciling this transfer. Sales earn USD while
-    payouts arrive in PHP, so matches are estimated via the configured rate:
-    single sales closest to the amount, plus pair/greedy combos for batched
-    cash-outs.
+    Reconciliation preview built on the batch cash-out model: a payout settles
+    the batch of unpaid completed sales, and the USD→PHP rate is DERIVED from
+    the payout rather than guessed. Returns the recommended `batch` (the whole
+    unpaid pool or an oldest-first FIFO prefix) with its implied rate, plus the
+    remaining unallocated sales for manual tweaks.
     """
     transfer = db.session.get(BankTransfer, transfer_id)
     if not transfer:
         return jsonify({"error": "Bank transfer not found."}), 404
 
-    from app.gmail.processor import _unallocated_completed_sales
+    from app.gmail.processor import _unallocated_completed_sales, _compute_transfer_batch
     from app.utils import get_php_estimate_rate
 
-    rate = get_php_estimate_rate()
+    est_rate = get_php_estimate_rate()
     amount = float(transfer.amount_php)
-    candidates = _unallocated_completed_sales(transfer.transfer_date, window_days=60)
+    candidates = _unallocated_completed_sales(transfer.transfer_date)
+    batch, rate, reason = _compute_transfer_batch(transfer)
 
-    def entry(sale):
-        est = float(sale.amount_made) * rate
+    def entry(sale, contribution_rate):
+        est = float(sale.amount_made) * contribution_rate
         return {
             "sale_id": sale.sale_id,
             "order_number": sale.order_number,
@@ -282,76 +284,56 @@ def allocation_suggestions(transfer_id):
             "completion_date": sale.completion_date.isoformat() if sale.completion_date else None,
             "amount_usd": float(sale.amount_made),
             "est_php": round(est, 2),
-            "diff_pct": round(abs(est - amount) / amount * 100, 2) if amount else None,
-            # If this sale IS the payout, this was Alias's actual FX rate —
-            # comparing it to the configured rate tells the operator what to
-            # set in Settings for auto-reconcile to work well.
-            "implied_rate": round(amount / float(sale.amount_made), 2) if float(sale.amount_made) else None,
         }
 
-    singles = sorted((entry(s) for s in candidates), key=lambda e: e["diff_pct"])
-    singles = [e for e in singles if e["diff_pct"] is not None and e["diff_pct"] <= 10][:10]
+    batch_block = None
+    if batch:
+        total_usd = sum(float(s.amount_made) for s in batch)
+        batch_block = {
+            "reason": reason,
+            "implied_rate": round(rate, 4),
+            "sale_count": len(batch),
+            "total_usd": round(total_usd, 2),
+            "sale_ids": [s.sale_id for s in batch],
+            "sales": [entry(s, rate) for s in batch],
+        }
 
-    # Pair combos for batched payouts (cap the candidate pool for O(n^2)).
-    pool = sorted(candidates, key=lambda s: float(s.amount_made), reverse=True)[:120]
-    pairs = []
-    for i in range(len(pool)):
-        for j in range(i + 1, len(pool)):
-            est = (float(pool[i].amount_made) + float(pool[j].amount_made)) * rate
-            diff = abs(est - amount) / amount if amount else 1
-            if diff <= 0.02:
-                pairs.append({
-                    "sale_ids": [pool[i].sale_id, pool[j].sale_id],
-                    "order_numbers": [pool[i].order_number, pool[j].order_number],
-                    "est_php": round(est, 2),
-                    "diff_pct": round(diff * 100, 2),
-                })
-    pairs.sort(key=lambda e: e["diff_pct"])
-
-    # Bounded subset search for larger batches (payouts often cover 3+ sales).
-    # DFS over the value-sorted pool, ±3% tolerance to absorb FX-rate error,
-    # depth ≤ 6, node budget so response time stays bounded.
-    greedy_combo = None
-    if amount:
-        search_pool = sorted(candidates, key=lambda s: float(s.amount_made), reverse=True)[:60]
-        found = []
-        budget = [30000]
-
-        def dfs(start, chosen, total_est):
-            if budget[0] <= 0 or len(found) >= 5:
-                return
-            budget[0] -= 1
-            diff = abs(total_est - amount) / amount
-            if len(chosen) >= 3 and diff <= 0.03:
-                found.append((diff, list(chosen)))
-                return
-            if len(chosen) >= 6 or total_est > amount * 1.03:
-                return
-            for i in range(start, len(search_pool)):
-                sale = search_pool[i]
-                dfs(i + 1, chosen + [sale], total_est + float(sale.amount_made) * rate)
-
-        dfs(0, [], 0.0)
-        if found:
-            found.sort(key=lambda item: item[0])
-            diff, combo = found[0]
-            total = sum(float(s.amount_made) for s in combo) * rate
-            greedy_combo = {
-                "sale_ids": [s.sale_id for s in combo],
-                "order_numbers": [s.order_number for s in combo],
-                "est_php": round(total, 2),
-                "diff_pct": round(diff * 100, 2),
-            }
+    # All unpaid sales in the window (for manual add/remove), estimated at the
+    # configured rate. Implied single-sale rate helps the operator sanity-check.
+    manual = [{
+        **entry(s, est_rate),
+        "implied_rate": round(amount / float(s.amount_made), 2) if float(s.amount_made) else None,
+    } for s in candidates]
 
     return jsonify({
         "transfer_id": transfer.transfer_id,
         "amount_php": amount,
-        "rate_used": rate,
+        "est_rate": est_rate,
         "candidates_in_window": len(candidates),
-        "singles": singles,
-        "pairs": pairs[:5],
-        "greedy_combo": greedy_combo,
+        "batch": batch_block,
+        "manual_candidates": manual,
     }), 200
+
+
+@bank_transfers_bp.route("/<int:transfer_id>/reconcile", methods=["POST"])
+def reconcile_transfer(transfer_id):
+    """
+    POST /api/bank-transfers/<id>/reconcile
+    Apply batch cash-out reconciliation to a single transfer on demand.
+    """
+    transfer = db.session.get(BankTransfer, transfer_id)
+    if not transfer:
+        return jsonify({"error": "Bank transfer not found."}), 404
+    if transfer.reconciliation_status == "Reconciled":
+        return jsonify({"error": "Transfer is already reconciled."}), 400
+
+    from app.gmail.processor import reconcile_transfer_batch
+    result = reconcile_transfer_batch(transfer)
+    db.session.commit()
+
+    payload = transfer.to_dict(with_allocations=True)
+    payload["result"] = result
+    return jsonify(payload), 200
 
 
 @bank_transfers_bp.route("/duplicates", methods=["GET"])
