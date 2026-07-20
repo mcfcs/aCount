@@ -11,6 +11,7 @@ import {
   getBankTransfers, getBankTransfersSummary, createBankTransfer, updateBankTransfer,
   getExpenses, getExpensesSummary, createExpense, updateExpense, deleteExpense, deleteBankTransfer,
   getSubscriptions, createSubscription, updateSubscription, deleteSubscription,
+  getTransferSuggestions, addTransferAllocation, autoReconcileTransfers,
 } from '../services/api'
 
 function formatPHP(value) {
@@ -73,6 +74,12 @@ function BankTransfersTab() {
   const [form, setForm] = useState(EMPTY_TRANSFER)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
+  const [suggestFor, setSuggestFor] = useState(null)
+  const [suggestions, setSuggestions] = useState(null)
+  const [suggestError, setSuggestError] = useState(null)
+  const [allocBusy, setAllocBusy] = useState(false)
+  const [autoBusy, setAutoBusy] = useState(false)
+  const [autoResult, setAutoResult] = useState(null)
   const phpRate = usePhpEstimateRate()
 
   const fetchData = useCallback(async () => {
@@ -127,6 +134,83 @@ function BankTransfersTab() {
 
   const set = (f) => (e) => setForm(prev => ({ ...prev, [f]: e.target.value }))
 
+  const openSuggestions = async (transfer) => {
+    setSuggestFor(transfer)
+    setSuggestions(null)
+    setSuggestError(null)
+    try {
+      setSuggestions(await getTransferSuggestions(transfer.transfer_id))
+    } catch (err) {
+      setSuggestError(err?.response?.data?.error || 'Could not load suggestions')
+    }
+  }
+
+  const closeSuggestions = () => {
+    setSuggestFor(null)
+    setSuggestions(null)
+    setSuggestError(null)
+  }
+
+  const allocateSingle = async (sale) => {
+    if (!suggestFor) return
+    setAllocBusy(true)
+    setSuggestError(null)
+    try {
+      await addTransferAllocation(suggestFor.transfer_id, {
+        sale_id: sale.sale_id,
+        allocated_amount: suggestFor.amount_php,
+      })
+      closeSuggestions()
+      fetchData()
+    } catch (err) {
+      setSuggestError(err?.response?.data?.errors?.join(', ') || err?.response?.data?.error || 'Allocation failed')
+    } finally {
+      setAllocBusy(false)
+    }
+  }
+
+  const allocateCombo = async (combo) => {
+    if (!suggestFor) return
+    setAllocBusy(true)
+    setSuggestError(null)
+    try {
+      // Split the transfer across the combo's sales proportionally to their
+      // estimated PHP value (backend recomputes status from the allocations).
+      const shares = combo.sale_ids.map((saleId) => ({
+        sale_id: saleId,
+        est: suggestions?.singles?.find(s => s.sale_id === saleId)?.est_php
+          ?? (combo.est_php / combo.sale_ids.length),
+      }))
+      const estSum = shares.reduce((s, x) => s + x.est, 0) || 1
+      for (const share of shares) {
+        await addTransferAllocation(suggestFor.transfer_id, {
+          sale_id: share.sale_id,
+          allocated_amount: Math.round((suggestFor.amount_php * share.est / estSum) * 100) / 100,
+        })
+      }
+      closeSuggestions()
+      fetchData()
+    } catch (err) {
+      setSuggestError(err?.response?.data?.errors?.join(', ') || err?.response?.data?.error || 'Allocation failed')
+    } finally {
+      setAllocBusy(false)
+    }
+  }
+
+  const handleAutoReconcile = async () => {
+    setAutoBusy(true)
+    setAutoResult(null)
+    try {
+      const result = await autoReconcileTransfers()
+      setAutoResult(result)
+      fetchData()
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Auto-reconcile failed')
+    } finally {
+      setAutoBusy(false)
+    }
+  }
+
   const openAdd = () => {
     setEditing(null)
     setForm({ ...EMPTY_TRANSFER, transfer_date: toDatetimeLocal(new Date().toISOString()) })
@@ -169,6 +253,15 @@ function BankTransfersTab() {
       </div>
 
         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          {autoResult && (
+            <span className="self-center text-xs text-gray-500">
+              Auto-matched {(autoResult.reconciled_single || 0) + (autoResult.reconciled_pair || 0)} of {autoResult.scanned} — {autoResult.still_unreconciled} left for manual review
+            </span>
+          )}
+          <button onClick={handleAutoReconcile} disabled={autoBusy}
+            className="w-full rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50 sm:w-auto">
+            {autoBusy ? 'Matching…' : 'Auto-reconcile'}
+          </button>
           <button onClick={handleExport} className="w-full rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors sm:w-auto">
             Export CSV
           </button>
@@ -202,6 +295,9 @@ function BankTransfersTab() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
+                        {t.reconciliation_status !== 'Reconciled' && (
+                          <button onClick={() => openSuggestions(t)} className="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Reconcile</button>
+                        )}
                         <button onClick={() => openEdit(t)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
                         <button onClick={() => handleDelete(t)} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
                       </div>
@@ -213,6 +309,83 @@ function BankTransfersTab() {
           </div>
         )}
       </div>
+
+      {suggestFor && (
+        <Modal title={`Reconcile — ${formatPHP(suggestFor.amount_php)} (${formatDate(suggestFor.transfer_date)})`} onClose={closeSuggestions}>
+          <div className="space-y-4">
+            {!suggestions && !suggestError && <LoadingSpinner className="py-6" />}
+            {suggestError && <p className="text-sm text-red-500">{suggestError}</p>}
+            {suggestions && (
+              <>
+                <p className="text-xs text-gray-500">
+                  Estimates use USD→PHP ≈ {suggestions.rate_used}. {suggestions.candidates_in_window} unallocated completed sale{suggestions.candidates_in_window === 1 ? '' : 's'} in the 60-day window.
+                </p>
+
+                {suggestions.singles?.length > 0 && (
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Closest single sales</p>
+                    <div className="space-y-2">
+                      {suggestions.singles.map((s) => (
+                        <div key={s.sale_id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm text-gray-800">#{s.order_number} — {s.shoe_name}</p>
+                            <p className="text-xs text-gray-500">
+                              ${s.amount_usd.toFixed(2)} ≈ {formatPHP(s.est_php)} · off by {s.diff_pct}%
+                              {s.implied_rate != null && <> · implies rate {s.implied_rate}</>} · completed {formatDate(s.completion_date)}
+                            </p>
+                          </div>
+                          <button onClick={() => allocateSingle(s)} disabled={allocBusy}
+                            className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                            Allocate
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(suggestions.pairs?.length > 0 || suggestions.greedy_combo) && (
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Batched payout combos</p>
+                    <div className="space-y-2">
+                      {(suggestions.pairs || []).map((combo, idx) => (
+                        <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm text-gray-800">Orders {combo.order_numbers.map(o => `#${o}`).join(' + ')}</p>
+                            <p className="text-xs text-gray-500">≈ {formatPHP(combo.est_php)} · off by {combo.diff_pct}%</p>
+                          </div>
+                          <button onClick={() => allocateCombo(combo)} disabled={allocBusy}
+                            className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                            Allocate pair
+                          </button>
+                        </div>
+                      ))}
+                      {suggestions.greedy_combo && (
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm text-gray-800">{suggestions.greedy_combo.sale_ids.length} sales batch</p>
+                            <p className="text-xs text-gray-500">≈ {formatPHP(suggestions.greedy_combo.est_php)} · off by {suggestions.greedy_combo.diff_pct}%</p>
+                          </div>
+                          <button onClick={() => allocateCombo(suggestions.greedy_combo)} disabled={allocBusy}
+                            className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                            Allocate batch
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {!suggestions.singles?.length && !suggestions.pairs?.length && !suggestions.greedy_combo && (
+                  <p className="text-sm text-gray-600">
+                    No close matches found with the current estimate rate. This payout likely covers several sales — allocate it manually from the sales list, or adjust the USD→PHP rate in Settings if it's far from Alias's actual rate.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
 
       {modalOpen && (
         <Modal title={editing ? 'Edit Bank Transfer' : 'Add Bank Transfer'} onClose={() => setModalOpen(false)}>

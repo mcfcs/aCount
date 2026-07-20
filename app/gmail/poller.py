@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".poll_state.json")
 ALIAS_SENDER = "info@alias.org"
 
+
+def _ingest_query() -> str:
+    """Gmail search covering Alias plus known merchant senders, so catch-up /
+    date-range fetches ingest the same emails the history poll sees."""
+    from app.gmail.classifier import MERCHANT_SENDER_KEYWORDS
+    senders = " OR ".join([ALIAS_SENDER] + MERCHANT_SENDER_KEYWORDS)
+    return f"from:({senders})"
+
 # When Gmail's incremental history is unavailable (first run, or the stored
 # historyId expired after downtime), catch up by date instead of just grabbing
 # the most recent handful — otherwise a downtime backlog is silently skipped.
@@ -247,7 +255,7 @@ def _fetch_recent(service, max_results: int = 50) -> list[str]:
     Fallback: Fetch recent messages from info@alias.org using messages.list.
     Used on first run or when historyId is stale.
     """
-    query = f"from:{ALIAS_SENDER}"
+    query = _ingest_query()
     message_ids = []
     page_token = None
 
@@ -278,7 +286,7 @@ def fetch_date_range(service, after: str, before: str = None, max_results: int =
     Gmail query uses YYYY/MM/DD format.
     """
     after_gm = after.replace("-", "/")
-    query = f"from:{ALIAS_SENDER} after:{after_gm}"
+    query = f"{_ingest_query()} after:{after_gm}"
     if before:
         before_gm = before.replace("-", "/")
         query += f" before:{before_gm}"

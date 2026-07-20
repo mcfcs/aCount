@@ -766,11 +766,16 @@ _MERCHANT_NAMES = {
     "shopee": "Shopee", "lazada": "Lazada", "netflix": "Netflix", "spotify": "Spotify",
     "apple": "Apple", "google": "Google", "youtube": "YouTube", "canva": "Canva",
     "notion": "Notion", "adobe": "Adobe", "microsoft": "Microsoft", "grab": "Grab",
-    "nike": "Nike", "adidas": "Adidas", "zalora": "Zalora",
+    "nike": "Nike", "adidas": "Adidas", "zalora": "Zalora", "footlocker": "Footlocker",
 }
 
 # Merchants whose orders are sneaker stock rather than personal spending.
-SNEAKER_MERCHANTS = {"Nike", "Adidas"}
+SNEAKER_MERCHANTS = {"Nike", "Adidas", "Footlocker"}
+
+# Pure recurring services: any validated charge from these is a subscription
+# even when the subject just says "receipt". (Grab/Apple excluded — they sell
+# rides/devices too, so their kind comes from the subject.)
+SUBSCRIPTION_MERCHANTS = {"Netflix", "Spotify", "YouTube", "Adobe", "Canva", "Notion"}
 
 
 def parse_merchant(sender: str) -> str:
@@ -783,6 +788,53 @@ def parse_merchant(sender: str) -> str:
     if match:
         return match.group(1).capitalize()
     return "Unknown"
+
+
+# Promo/notice markers — any hit means "not a charge", checked BEFORE the
+# positive list (real charge subjects never read like these).
+_PROMO_SUBJECT_RE = re.compile(
+    r"(?:%\s?off|\boff\b|voucher|deal|sale|promo|payday|cashback|win\b|winners?\b|free\b|"
+    r"don'?t miss|last chance|act fast|flash|check out|come back|welcome back|top\s?\d+|"
+    r"rediscover|give (?:a friend|us another)|expir(?:e|es|ing)|is full|out now|"
+    r"now available|get it now|order the new|\bthe new\b|under \$|must-haves|crazy days|"
+    r"have you received|score\b|exclusive)",
+    re.IGNORECASE,
+)
+
+# Evidence the email documents an actual transaction.
+_CHARGE_SUBJECT_RE = re.compile(
+    r"(?:receipt|invoice|order confirmation|confirmation of your order|"
+    r"your order [#\w]|order [#\d]+ has been|has been processed|has been delivered|"
+    r"payment (?:has been )?(?:confirmed|received|successful)|you (?:were )?(?:charged|paid)|"
+    r"billed|renewal|renewed|subscription is confirmed|thank you for your (?:order|purchase)|"
+    r"order details|e-?receipt)",
+    re.IGNORECASE,
+)
+
+_SUBSCRIPTION_KIND_RE = re.compile(
+    r"(?:subscri|invoice|renew|membership|\bplan\b|premium)", re.IGNORECASE
+)
+
+
+def looks_like_charge_email(subject: str) -> bool:
+    """True only when the subject reads like a transaction record, not
+    marketing. Promo markers veto first; then charge evidence is required."""
+    text = str(subject or "")
+    if _PROMO_SUBJECT_RE.search(text):
+        return False
+    return bool(_CHARGE_SUBJECT_RE.search(text))
+
+
+def infer_expense_kind(subject: str, merchant: str) -> str:
+    """Expense category for a validated charge email. Recurring-service
+    merchants or subscription language → Subscription; sneaker merchants →
+    Sneaker Purchase; the rest (incl. Grab ride/food e-receipts) → Personal
+    Order."""
+    if merchant in SUBSCRIPTION_MERCHANTS or _SUBSCRIPTION_KIND_RE.search(str(subject or "")):
+        return "Subscription"
+    if merchant in SNEAKER_MERCHANTS:
+        return "Sneaker Purchase"
+    return "Personal Order"
 
 
 def parse_payment_amount(subject: str, body: str) -> dict:

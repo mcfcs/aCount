@@ -241,6 +241,18 @@ def remove_allocation(transfer_id, allocation_id):
 
 # ---- Reconciliation assist ------------------------------------------------
 
+@bank_transfers_bp.route("/auto-reconcile", methods=["POST"])
+def auto_reconcile_all():
+    """
+    POST /api/bank-transfers/auto-reconcile
+    Run conservative amount-aware matching over every Unreconciled transfer
+    (unique single within ±2%, or unique pair within ±1.5%). Ambiguous ones
+    stay Unreconciled for the suggestions flow.
+    """
+    from app.gmail.processor import auto_reconcile_all_transfers
+    return jsonify(auto_reconcile_all_transfers()), 200
+
+
 @bank_transfers_bp.route("/<int:transfer_id>/suggestions", methods=["GET"])
 def allocation_suggestions(transfer_id):
     """
@@ -271,6 +283,10 @@ def allocation_suggestions(transfer_id):
             "amount_usd": float(sale.amount_made),
             "est_php": round(est, 2),
             "diff_pct": round(abs(est - amount) / amount * 100, 2) if amount else None,
+            # If this sale IS the payout, this was Alias's actual FX rate —
+            # comparing it to the configured rate tells the operator what to
+            # set in Settings for auto-reconcile to work well.
+            "implied_rate": round(amount / float(sale.amount_made), 2) if float(sale.amount_made) else None,
         }
 
     singles = sorted((entry(s) for s in candidates), key=lambda e: e["diff_pct"])
@@ -292,21 +308,40 @@ def allocation_suggestions(transfer_id):
                 })
     pairs.sort(key=lambda e: e["diff_pct"])
 
-    # Greedy subset for larger batches.
-    greedy, total = [], 0.0
-    for sale in pool:
-        est = float(sale.amount_made) * rate
-        if total + est <= amount * 1.02:
-            greedy.append(sale)
-            total += est
+    # Bounded subset search for larger batches (payouts often cover 3+ sales).
+    # DFS over the value-sorted pool, ±3% tolerance to absorb FX-rate error,
+    # depth ≤ 6, node budget so response time stays bounded.
     greedy_combo = None
-    if amount and greedy and abs(total - amount) / amount <= 0.02 and len(greedy) > 2:
-        greedy_combo = {
-            "sale_ids": [s.sale_id for s in greedy],
-            "order_numbers": [s.order_number for s in greedy],
-            "est_php": round(total, 2),
-            "diff_pct": round(abs(total - amount) / amount * 100, 2),
-        }
+    if amount:
+        search_pool = sorted(candidates, key=lambda s: float(s.amount_made), reverse=True)[:60]
+        found = []
+        budget = [30000]
+
+        def dfs(start, chosen, total_est):
+            if budget[0] <= 0 or len(found) >= 5:
+                return
+            budget[0] -= 1
+            diff = abs(total_est - amount) / amount
+            if len(chosen) >= 3 and diff <= 0.03:
+                found.append((diff, list(chosen)))
+                return
+            if len(chosen) >= 6 or total_est > amount * 1.03:
+                return
+            for i in range(start, len(search_pool)):
+                sale = search_pool[i]
+                dfs(i + 1, chosen + [sale], total_est + float(sale.amount_made) * rate)
+
+        dfs(0, [], 0.0)
+        if found:
+            found.sort(key=lambda item: item[0])
+            diff, combo = found[0]
+            total = sum(float(s.amount_made) for s in combo) * rate
+            greedy_combo = {
+                "sale_ids": [s.sale_id for s in combo],
+                "order_numbers": [s.order_number for s in combo],
+                "est_php": round(total, 2),
+                "diff_pct": round(diff * 100, 2),
+            }
 
     return jsonify({
         "transfer_id": transfer.transfer_id,
@@ -343,6 +378,50 @@ def duplicate_transfers():
     ]
     duplicates.sort(key=lambda g: g["transfer_date"])
     return jsonify({"groups": duplicates, "total_extra_rows": sum(g["count"] - 1 for g in duplicates)}), 200
+
+
+@bank_transfers_bp.route("/duplicates/clean", methods=["POST"])
+def clean_duplicate_transfers():
+    """
+    POST /api/bank-transfers/duplicates/clean
+    Body: { "confirm": "CLEAN-DUPLICATES" }
+
+    Deletes the extra copies in each same-day same-amount group (artifacts of
+    force re-scrapes before ingestion dedup was fixed), keeping one row per
+    group — preferring a row that has allocations, else the oldest. Explicit
+    confirmation required; review GET /api/bank-transfers/duplicates first.
+    """
+    data = request.get_json(silent=True) or {}
+    if str(data.get("confirm", "")).strip() != "CLEAN-DUPLICATES":
+        return jsonify({"error": 'Send {"confirm": "CLEAN-DUPLICATES"} to proceed. Review GET /duplicates first.'}), 400
+
+    groups = {}
+    for t in BankTransfer.query.all():
+        key = (t.transfer_date.date(), round(float(t.amount_php), 2))
+        groups.setdefault(key, []).append(t)
+
+    deleted, kept, removed_php = 0, 0, 0.0
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+        allocated = {t.transfer_id for t in items
+                     if BankTransferAllocation.query.filter_by(transfer_id=t.transfer_id).count() > 0}
+        items.sort(key=lambda t: (t.transfer_id not in allocated, t.transfer_id))
+        keeper, extras = items[0], items[1:]
+        kept += 1
+        for extra in extras:
+            if extra.transfer_id in allocated:
+                continue  # never silently drop a reconciled row
+            removed_php += float(extra.amount_php)
+            db.session.delete(extra)
+            deleted += 1
+
+    db.session.commit()
+    return jsonify({
+        "deleted": deleted,
+        "groups_cleaned": kept,
+        "removed_php_total": round(removed_php, 2),
+    }), 200
 
 
 # ---- Summary --------------------------------------------------------------

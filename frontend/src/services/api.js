@@ -53,6 +53,9 @@ export const unsubscribePush = (data) => client.post('/push/unsubscribe', data).
 export const sendTestPush = () => client.post('/push/test').then(r => r.data)
 
 // Bank Transfers
+export const getTransferSuggestions = (id) => client.get(`/bank-transfers/${id}/suggestions`).then(r => r.data)
+export const addTransferAllocation = (id, data) => client.post(`/bank-transfers/${id}/allocations`, data).then(r => r.data)
+export const autoReconcileTransfers = () => client.post('/bank-transfers/auto-reconcile').then(r => r.data)
 export const getBankTransfers = (params = {}) => client.get('/bank-transfers', { params }).then(r => r.data)
 export const getBankTransfersSummary = () => client.get('/bank-transfers/summary').then(r => r.data)
 export const createBankTransfer = (data) => client.post('/bank-transfers', data).then(r => r.data)

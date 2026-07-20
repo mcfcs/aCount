@@ -108,6 +108,25 @@ def scrape():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@gmail_bp.post("/backfill-merchant")
+def backfill_merchant():
+    """
+    POST /api/gmail/backfill-merchant
+    Re-process historical Subscription/Purchase/Receipt emails (and recover
+    Failed rows) through the current handlers, using their stored Gmail ids.
+    Body (optional): { "limit": 200, "include_failed": true }
+    Call repeatedly until "remaining" reaches 0.
+    """
+    data = request.get_json(silent=True) or {}
+    limit = min(int(data.get("limit", 200) or 200), 500)
+    include_failed = bool(data.get("include_failed", True))
+
+    from app.gmail.backfill import backfill_from_log
+    summary = backfill_from_log(current_app._get_current_object(), limit=limit, include_failed=include_failed)
+    status = 502 if summary.get("status") == "error" else 200
+    return jsonify(summary), status
+
+
 @gmail_bp.get("/scrape-status")
 def scrape_status():
     """Return current background scrape progress."""

@@ -37,6 +37,17 @@ Camera notes:
 - To scan **from a phone**, browsers require HTTPS: start the frontend with `VITE_HTTPS=1` (e.g. PowerShell: `$env:VITE_HTTPS='1'; npm run dev`) and open the `https://<LAN-IP>:5173` URL shown by Vite, accepting the self-signed certificate warning.
 - Photo upload works everywhere without HTTPS. Use JPG/PNG (browsers can't decode HEIC outside Safari).
 
+## Expense / Subscription Ingestion & Reconciliation
+
+Beyond Alias lifecycle emails, the Gmail pipeline now also records:
+
+- **Subscription charges** (Netflix, Spotify, Canva, …) → an Expense (category `Subscription`) plus an auto-updated row in the Subscriptions tracker with the next billing date.
+- **Merchant orders** (Shopee, Lazada → `Personal Order`; Nike, Adidas → `Sneaker Purchase`) → an Expense with the parsed order total.
+
+Historical emails that were logged before these handlers existed can be re-processed with `POST /api/gmail/backfill-merchant` (repeat until `remaining` is 0; also recovers previously **Failed** emails such as sales lost to the old shoes-SKU crash).
+
+**Bank-transfer reconciliation** matches payouts to completed sales by amount (sale USD × the configured USD→PHP rate): ingestion auto-reconciles unambiguous matches, the **Auto-reconcile** button on Financial → Bank Transfers runs the same conservative matcher over everything Unreconciled (unique single ±2%, unique pair ±1.5%), and each remaining transfer has a **Reconcile** button showing ranked single/pair/batch suggestions with one-click allocation. `GET /api/bank-transfers/duplicates` lists likely double-ingested payouts (same day + amount) for manual cleanup. Keeping the USD→PHP rate in Settings close to Alias's actual payout rate makes matching much more accurate.
+
 ## Push Notifications
 
 Enable under **Settings → Push Notifications** ("Enable on this device"), then use "Send test notification" to verify. Notifications are sent by the backend's background poller:

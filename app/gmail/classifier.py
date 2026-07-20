@@ -23,6 +23,15 @@ PURCHASE_KEYWORDS = [
     "order confirmation", "your order", "payment confirmed",
 ]
 
+# Sender words for the Gmail fetch query. The incremental history poll sees the
+# whole mailbox, but catch-up/date-range fetches are query-based — without
+# these, merchant emails are silently missed whenever the history cursor lapses.
+MERCHANT_SENDER_KEYWORDS = [
+    "shopee", "lazada", "zalora", "nike", "adidas",
+    "netflix", "spotify", "grab", "adobe", "microsoft", "apple",
+    "google", "canva", "notion", "youtube",
+]
+
 
 def classify_email(sender: str, subject: str, body: str) -> str:
     """

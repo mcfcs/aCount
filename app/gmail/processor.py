@@ -652,30 +652,38 @@ def _month_after(d: date) -> date:
         return d.replace(year=year, month=month, day=28)
 
 
-def _handle_subscription_charge(data: dict, subject: str, sent_at=None):
+def _handle_merchant_charge(data: dict, subject: str, sent_at=None):
     """
-    Non-Alias subscription charge email (Netflix, Spotify, ...).
-    Creates an Expense (category=Subscription) and upserts the Subscription
-    master row so recurring burn is tracked.
+    Non-Alias merchant email (Shopee, Netflix, Grab, ...). Creates an Expense
+    only when the SUBJECT reads like an actual transaction record
+    (parsers.looks_like_charge_email) — marketing/promo emails carry peso
+    amounts too, and parsing those fabricated expenses. Category comes from
+    the subject (invoice/renewal → Subscription, which also updates the
+    Subscription tracker; sneaker merchants → Sneaker Purchase; else
+    Personal Order).
     """
+    if not parsers.looks_like_charge_email(subject):
+        logger.info(f"Merchant email rejected as promo/notice (no charge evidence): {str(subject)[:80]!r}")
+        return None
     if not data.get("amount"):
-        logger.info("Subscription email had no parseable amount — skipping record creation.")
+        logger.info("Merchant charge email had no parseable amount — skipping record creation.")
         return None
 
     merchant = data.get("merchant") or "Unknown"
+    category = parsers.infer_expense_kind(subject, merchant)
     expense_date = (sent_at or now()).date()
     amount_original, currency, amount_php, conversion_rate = _expense_amounts(data)
 
-    # Dedup: same merchant charged the same amount on the same day.
+    # Dedup: same merchant + category + amount on the same day.
     existing = Expense.query.filter_by(
-        category="Subscription", source=merchant, expense_date=expense_date,
+        category=category, source=merchant, expense_date=expense_date,
     ).filter(Expense.amount_original == amount_original).first()
     if existing:
         return "Expense", existing.expense_id
 
     expense = Expense(
-        category="Subscription",
-        description=f"{merchant} subscription",
+        category=category,
+        description=str(subject or f"{merchant} charge")[:500],
         amount_original=amount_original,
         original_currency=currency,
         amount_php=amount_php,
@@ -686,64 +694,38 @@ def _handle_subscription_charge(data: dict, subject: str, sent_at=None):
     )
     db.session.add(expense)
 
-    subscription = Subscription.query.filter_by(name=merchant).first()
-    if subscription:
-        subscription.amount_original = amount_original
-        subscription.original_currency = currency
-        subscription.amount_php = amount_php
-        subscription.next_billing_date = _month_after(expense_date)
-        if subscription.status != "Active":
-            subscription.status = "Active"
-    else:
-        db.session.add(Subscription(
-            name=merchant,
-            amount_original=amount_original,
-            original_currency=currency,
-            amount_php=amount_php,
-            billing_cycle="Monthly",
-            next_billing_date=_month_after(expense_date),
-            status="Active",
-        ))
+    if category == "Subscription":
+        subscription = Subscription.query.filter_by(name=merchant).first()
+        if subscription:
+            subscription.amount_original = amount_original
+            subscription.original_currency = currency
+            subscription.amount_php = amount_php
+            subscription.next_billing_date = _month_after(expense_date)
+            if subscription.status != "Active":
+                subscription.status = "Active"
+        else:
+            db.session.add(Subscription(
+                name=merchant,
+                amount_original=amount_original,
+                original_currency=currency,
+                amount_php=amount_php,
+                billing_cycle="Monthly",
+                next_billing_date=_month_after(expense_date),
+                status="Active",
+            ))
 
-    db.session.commit()
-    logger.info(f"Subscription charge recorded: {merchant} {currency} {amount_original}")
-    return "Expense", expense.expense_id
-
-
-def _handle_merchant_purchase(data: dict, subject: str, sent_at=None):
-    """
-    Non-Alias order/receipt email (Shopee, Lazada, Nike, ...).
-    Creates an Expense: Sneaker Purchase for sneaker merchants, else Personal Order.
-    """
-    if not data.get("amount"):
-        logger.info("Purchase/receipt email had no parseable amount — skipping record creation.")
-        return None
-
-    merchant = data.get("merchant") or "Unknown"
-    expense_date = (sent_at or now()).date()
-    amount_original, currency, amount_php, conversion_rate = _expense_amounts(data)
-    category = "Sneaker Purchase" if merchant in parsers.SNEAKER_MERCHANTS else "Personal Order"
-
-    existing = Expense.query.filter_by(
-        category=category, source=merchant, expense_date=expense_date,
-    ).filter(Expense.amount_original == amount_original).first()
-    if existing:
-        return "Expense", existing.expense_id
-
-    expense = Expense(
-        category=category,
-        description=str(subject or f"{merchant} order")[:500],
-        amount_original=amount_original,
-        original_currency=currency,
-        amount_php=amount_php,
-        conversion_rate=conversion_rate,
-        expense_date=expense_date,
-        source=merchant,
-    )
-    db.session.add(expense)
     db.session.commit()
     logger.info(f"{category} expense recorded: {merchant} {currency} {amount_original}")
     return "Expense", expense.expense_id
+
+
+# Backwards-compatible names used by the dispatcher and backfill.
+def _handle_subscription_charge(data: dict, subject: str, sent_at=None):
+    return _handle_merchant_charge(data, subject, sent_at=sent_at)
+
+
+def _handle_merchant_purchase(data: dict, subject: str, sent_at=None):
+    return _handle_merchant_charge(data, subject, sent_at=sent_at)
 
 
 def _handle_bank_transfer(data: dict, sent_at=None):
@@ -865,6 +847,77 @@ def _auto_reconcile_transfer(transfer: BankTransfer):
             f"BankTransfer {transfer.transfer_id}: {len(unallocated)} candidates, "
             f"{len(tight)} within 2% — manual reconciliation required."
         )
+
+
+def auto_reconcile_all_transfers() -> dict:
+    """Backfill: run amount-aware matching over every Unreconciled transfer,
+    oldest first (so earlier payouts claim their sales before later ones).
+
+    Two conservative rules per transfer:
+    - unique single sale within ±2% (and nothing else within ±5%), or
+    - unique PAIR of sales within ±1.5% when no single is even within ±5%
+      (small batched cash-outs). Ambiguous transfers stay for the
+      suggestions-assisted manual flow.
+    """
+    from app.utils import get_php_estimate_rate
+
+    rate = get_php_estimate_rate()
+    transfers = (
+        BankTransfer.query
+        .filter_by(reconciliation_status="Unreconciled")
+        .order_by(BankTransfer.transfer_date.asc())
+        .all()
+    )
+    reconciled_singles, reconciled_pairs = [], []
+
+    for transfer in transfers:
+        amount = float(transfer.amount_php)
+        if not amount:
+            continue
+
+        _auto_reconcile_transfer(transfer)
+        if transfer.reconciliation_status == "Reconciled":
+            db.session.commit()
+            reconciled_singles.append(transfer.transfer_id)
+            continue
+
+        candidates = _unallocated_completed_sales(transfer.transfer_date, window_days=60)
+        singles_5 = [s for s in candidates
+                     if abs(float(s.amount_made) * rate - amount) / amount <= 0.05]
+        if singles_5 or len(candidates) < 2:
+            db.session.commit()
+            continue
+
+        pool = sorted(candidates, key=lambda s: float(s.amount_made), reverse=True)[:120]
+        matching_pairs = []
+        for i in range(len(pool)):
+            for j in range(i + 1, len(pool)):
+                est = (float(pool[i].amount_made) + float(pool[j].amount_made)) * rate
+                if abs(est - amount) / amount <= 0.015:
+                    matching_pairs.append((pool[i], pool[j], est))
+            if len(matching_pairs) > 1:
+                break
+        if len(matching_pairs) == 1:
+            sale_a, sale_b, est = matching_pairs[0]
+            share_a = float(sale_a.amount_made) * rate / est
+            db.session.add(BankTransferAllocation(
+                transfer_id=transfer.transfer_id, sale_id=sale_a.sale_id,
+                allocated_amount=round(amount * share_a, 2)))
+            db.session.add(BankTransferAllocation(
+                transfer_id=transfer.transfer_id, sale_id=sale_b.sale_id,
+                allocated_amount=round(amount * (1 - share_a), 2)))
+            transfer.reconciliation_status = "Reconciled"
+            reconciled_pairs.append(transfer.transfer_id)
+            logger.info(f"Pair-reconciled transfer {transfer.transfer_id} → sales "
+                        f"{sale_a.sale_id}+{sale_b.sale_id}")
+        db.session.commit()
+
+    return {
+        "scanned": len(transfers),
+        "reconciled_single": len(reconciled_singles),
+        "reconciled_pair": len(reconciled_pairs),
+        "still_unreconciled": BankTransfer.query.filter_by(reconciliation_status="Unreconciled").count(),
+    }
 
 
 # =============================================================================
