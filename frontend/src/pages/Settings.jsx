@@ -39,12 +39,34 @@ function StatusPill({ tone = 'blue', children }) {
   )
 }
 
+function pushSupportDiagnosis() {
+  if (typeof window === 'undefined') return { supported: false, reasons: [], isIOS: false, standalone: false }
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  const standalone = window.matchMedia?.('(display-mode: standalone)')?.matches
+    || window.navigator.standalone === true
+  const reasons = []
+  if (!window.isSecureContext) {
+    reasons.push('Not a secure context — the app must be opened over HTTPS (e.g. the Tailscale https:// URL) or localhost.')
+  }
+  if (!('serviceWorker' in navigator)) {
+    reasons.push('Service workers unavailable in this browser.')
+  }
+  if (!('PushManager' in window) || !('Notification' in window)) {
+    if (isIOS && !standalone) {
+      reasons.push('On iPhone, push only exists inside the installed app — open aCount from its Home Screen icon, not in Safari.')
+    } else if (isIOS) {
+      reasons.push('This iPhone exposes no Push API. It needs iOS 16.4 or newer — and if the Home Screen icon was added before the app became installable (or via a different URL), remove it and re-add it from the current HTTPS address.')
+    } else {
+      reasons.push('This browser has no Push API support.')
+    }
+  }
+  return { supported: reasons.length === 0, reasons, isIOS, standalone }
+}
+
 function PushNotificationsCard() {
-  const supported = typeof window !== 'undefined'
-    && window.isSecureContext
-    && 'serviceWorker' in navigator
-    && 'PushManager' in window
-    && 'Notification' in window
+  const [diag] = useState(pushSupportDiagnosis)
+  const supported = diag.supported
 
   const [serverStatus, setServerStatus] = useState(null)
   const [subscribed, setSubscribed] = useState(false)
@@ -130,10 +152,14 @@ function PushNotificationsCard() {
         payouts, and time-critical alerts (attention-needed 48h timer, shipment deadlines) — even
         when the app is closed. Enable per device; on iPhone, add the app to the Home Screen first.
       </p>
-      {!supported && (
-        <StatusPill tone="red">
-          This browser/context doesn&apos;t support push. It needs HTTPS (or localhost) and a modern browser.
-        </StatusPill>
+      {!supported && diag.reasons.map((reason) => (
+        <StatusPill key={reason} tone="red">{reason}</StatusPill>
+      ))}
+      {!supported && diag.isIOS && (
+        <p className="text-xs text-gray-500">
+          Diagnostics: {diag.standalone ? 'running as installed app' : 'running in the browser (not installed)'} ·
+          secure context: {String(typeof window !== 'undefined' && window.isSecureContext)}
+        </p>
       )}
       {supported && serverStatus && !serverStatus.configured && (
         <StatusPill tone="red">Server push is not configured — set the VAPID keys in .env and restart the backend.</StatusPill>

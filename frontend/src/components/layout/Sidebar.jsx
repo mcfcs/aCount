@@ -70,7 +70,7 @@ export default function Sidebar({ isOpen = false, onClose = () => {} }) {
     <aside
       className={`${
         isOpen ? 'translate-x-0' : '-translate-x-full'
-      } fixed left-0 top-0 bottom-0 z-40 flex w-72 max-w-[85vw] min-w-0 flex-col overflow-hidden border-r border-[#1d1d23] bg-[#0c0c0e] transition-transform duration-300 lg:translate-x-0 lg:z-10`}
+      } fixed left-0 top-0 bottom-0 z-40 flex w-72 max-w-[85vw] min-w-0 flex-col overflow-hidden border-r border-[#1d1d23] bg-[#0c0c0e] pt-[env(safe-area-inset-top)] transition-transform duration-300 lg:translate-x-0 lg:z-10`}
     >
       {/* accent seam down the inner edge */}
       <span className="pointer-events-none absolute right-0 top-0 h-full w-px bg-linear-to-b from-accent/40 via-transparent to-transparent" />

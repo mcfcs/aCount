@@ -1,6 +1,8 @@
 export default function TopBar({ title, onRefresh, loading = false }) {
   return (
-    <div className="sticky top-0 z-30 border-b border-gray-100 bg-gray-50/85 backdrop-blur-md">
+    // pt-safe: in the installed PWA the page draws under the iOS status bar
+    // (viewport-fit=cover + translucent status bar) — pad it clear.
+    <div className="sticky top-0 z-30 border-b border-gray-100 bg-gray-50/85 pt-[env(safe-area-inset-top)] backdrop-blur-md">
       {/* hairline accent rule */}
       <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-linear-to-r from-indigo-600/70 via-indigo-600/10 to-transparent" />
       <div className="flex items-end justify-between gap-4 px-4 py-4 sm:px-6 sm:py-5">
