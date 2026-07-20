@@ -24,6 +24,20 @@ ALLOWED_RATE_MIN = 0.0001
 settings_bp = Blueprint("settings", __name__)
 
 
+@settings_bp.post("/maintenance/lifecycle")
+def run_lifecycle_maintenance_endpoint():
+    """
+    POST /api/settings/maintenance/lifecycle
+    Back-fills unlinked cancellation emails onto their sales and auto-expires
+    abandoned Pending / overdue-Confirmed sales (STALE_SALE_EXPIRY_DAYS, default 7).
+    Also runs automatically on the background poller interval; this endpoint
+    triggers it on demand and returns what changed.
+    """
+    from app.sale_maintenance import run_lifecycle_maintenance
+    summary = run_lifecycle_maintenance()
+    return jsonify(summary), 200
+
+
 @settings_bp.get("/php-rate")
 def get_php_rate():
     """

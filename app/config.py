@@ -31,6 +31,12 @@ class Config:
     # trial tier (~100 lookups/day per IP); confirmed scans are cached locally.
     UPCITEMDB_API_KEY = os.getenv("UPCITEMDB_API_KEY")
 
+    # Web Push (VAPID). Generate once with scripts or `npx web-push generate-vapid-keys`;
+    # push stays disabled until both keys are set.
+    VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
+    VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+    VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:admin@example.com")
+
 
 class DevelopmentConfig(Config):
     DEBUG = True
@@ -38,8 +44,7 @@ class DevelopmentConfig(Config):
         "DATABASE_URL",
         "postgresql://acount_user:acount_pass@localhost:5432/acount_db"
     )
-    # Reset is allowed by default in development for convenience.
-    ALLOW_DB_RESET = _as_bool(os.getenv("ALLOW_DB_RESET"), default=True)
+    # Destructive reset is opt-in everywhere: set ALLOW_DB_RESET=true to enable.
 
 
 class ProductionConfig(Config):

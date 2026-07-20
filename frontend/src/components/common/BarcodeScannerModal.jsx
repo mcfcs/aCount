@@ -233,7 +233,7 @@ export default function BarcodeScannerModal({ onClose, onItemAdded }) {
   const handleManualLookup = () => {
     const digits = manualCode.replace(/\D/g, '')
     if (digits.length < 8 || digits.length > 14) {
-      setScanError('Enter the 12 or 13 digit number printed under the barcode.')
+      setScanError('Enter the number printed under the barcode (8–14 digits, usually 12 or 13).')
       return
     }
     setScanError(null)

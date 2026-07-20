@@ -70,7 +70,7 @@ function ScrapeProgressIndicator() {
   const total = Number(status.total_fetched || 0)
 
   return (
-    <div className="fixed left-3 right-3 bottom-4 z-50 mx-auto max-w-[95vw] rounded-lg border border-blue-200 bg-white px-3 py-2 text-[11px] text-blue-700 shadow-md sm:left-4 sm:right-auto sm:text-xs">
+    <div className="fixed left-16 right-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-50 mx-auto max-w-[95vw] rounded-lg border border-blue-200 bg-white px-3 py-2 text-[11px] text-blue-700 shadow-md sm:bottom-4 lg:left-4 lg:right-auto sm:text-xs">
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 animate-pulse rounded-full bg-blue-600" />
         <span>
@@ -109,7 +109,7 @@ export default function App() {
         <button
           type="button"
           aria-label="Open navigation"
-          className="lg:hidden fixed left-3 bottom-3 z-50 rounded-lg border border-gray-200 bg-white px-2 py-2 text-gray-700 shadow-sm"
+          className="lg:hidden fixed left-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-50 rounded-lg border border-gray-200 bg-white px-2 py-2 text-gray-700 shadow-sm"
           onClick={() => setMobileMenuOpen((prev) => !prev)}
         >
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

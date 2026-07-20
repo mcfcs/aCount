@@ -1,5 +1,7 @@
 from typing import Optional, Tuple
 
+from sqlalchemy.exc import IntegrityError
+
 from app import db
 from app.models.models import Shoe
 
@@ -64,7 +66,18 @@ def ensure_shoe_exists(
             shoe.image_path = image_path
         return False, shoe
 
+    # Insert inside a savepoint: a concurrent insert of the same SKU (poller
+    # thread vs API request) raised UniqueViolation here and poisoned the whole
+    # session — several real sale emails were permanently lost to that. Now the
+    # loser of the race just adopts the winner's row.
     new_shoe = Shoe(sku=sku, name=normalized_name, brand=final_brand, image_path=image_path)
-    db.session.add(new_shoe)
+    try:
+        with db.session.begin_nested():
+            db.session.add(new_shoe)
+    except IntegrityError:
+        existing = Shoe.query.filter_by(sku=sku).first()
+        if existing:
+            return False, existing
+        raise
     return True, new_shoe
 

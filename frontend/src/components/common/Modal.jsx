@@ -1,7 +1,31 @@
+import { useEffect } from 'react'
+
 export default function Modal({ title, onClose, children }) {
+  // Close on Escape + lock body scroll while open (mobile scrolls the page
+  // behind the dialog otherwise).
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [onClose])
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-      <div className="relative flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl shadow-black/60 animate-rise">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="relative flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl shadow-black/60 animate-rise"
+      >
         {/* accent rule across the top */}
         <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-linear-to-r from-indigo-600 via-indigo-600/30 to-transparent" />
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-gray-100 px-6 py-4">

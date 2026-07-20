@@ -11,11 +11,10 @@ PDF starts on its own sheet, so one order never shares a sheet with another.
 import io
 import logging
 import re
-import urllib.request
 
 from pypdf import PdfReader, PdfWriter, Transformation
 
-from app.utils import assert_safe_public_url
+from app.utils import fetch_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +37,18 @@ class LabelPdfError(Exception):
 
 def download_pdf(url: str) -> bytes:
     """Fetch a label PDF over http(s), guarding against SSRF and oversize files."""
-    assert_safe_public_url(url)  # http(s) + resolves to a public address only
-    req = urllib.request.Request(url, headers={"User-Agent": "aCount-LabelFetcher/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as response:
-            content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-            raw = response.read(MAX_PDF_BYTES + 1)  # +1 so we can detect oversize
+        # SSRF-hardened: validates every redirect hop + enforces the size cap.
+        raw, content_type = fetch_public_url(
+            url,
+            max_bytes=MAX_PDF_BYTES,
+            timeout=DOWNLOAD_TIMEOUT,
+            user_agent="aCount-LabelFetcher/1.0",
+        )
     except LabelPdfError:
         raise
     except Exception as exc:
         raise LabelPdfError(f"Could not download label PDF: {exc}") from exc
-
-    if len(raw) > MAX_PDF_BYTES:
-        raise LabelPdfError(f"Label PDF exceeds the {MAX_PDF_BYTES // (1024 * 1024)} MB limit.")
-    if not raw:
-        raise LabelPdfError("Label PDF response was empty.")
     if not raw.startswith(b"%PDF"):
         raise LabelPdfError(f"URL did not return a PDF (content-type: {content_type or 'unknown'}).")
     return raw

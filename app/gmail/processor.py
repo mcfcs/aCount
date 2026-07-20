@@ -17,6 +17,7 @@ from app import db
 from sqlalchemy.exc import IntegrityError
 from app.models.models import (
     Sale, Inventory, BankTransfer, BankTransferAllocation, Expense, EmailProcessingLog, Shoe,
+    Subscription,
 )
 from app.gmail.classifier import classify_email
 from app.gmail import parsers
@@ -75,10 +76,13 @@ def _match_sale_inventory(sale: Sale):
     if not sale.sku or sale.size is None:
         return None
 
+    # Row lock so the poller thread and API requests can't both claim the same
+    # pair (SQLite ignores FOR UPDATE, so tests are unaffected).
     matched = (
         Inventory.query
         .filter_by(sku=sale.sku, size=sale.size, status="Available")
-        .order_by(Inventory.date_purchased.asc())
+        .order_by(Inventory.date_purchased.asc(), Inventory.inventory_id.asc())
+        .with_for_update(skip_locked=True)
         .first()
     )
     if matched:
@@ -134,7 +138,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
     status = "Success"
 
     try:
-        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image, shipping_label_url=shipping_label_url)
+        result = _dispatch(email_type, subject, body, parsed_data, sent_at=sent_at, shoe_image=shoe_image, shipping_label_url=shipping_label_url, sender=sender)
         if result:
             record_type, record_id = result
     except Exception as e:
@@ -167,7 +171,7 @@ def process_message(gmail_message_id: str, subject: str, sender: str, body: str,
 # Dispatch table
 # =============================================================================
 
-def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None, shipping_label_url=None):
+def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_at=None, shoe_image=None, shipping_label_url=None, sender=""):
     """Route to the correct handler. Returns (record_type, record_id) or None."""
 
     if email_type == "Sale":
@@ -214,8 +218,19 @@ def _dispatch(email_type: str, subject: str, body: str, parsed_data: dict, sent_
         parsed_data.update(data)
         return _handle_bank_transfer(data, sent_at=sent_at)
 
-    elif email_type in ("Purchase", "Receipt", "Subscription", "Other"):
-        logger.info(f"Email type '{email_type}' received — not yet implemented.")
+    elif email_type == "Subscription":
+        data = parsers.parse_payment_amount(subject, body)
+        data["merchant"] = parsers.parse_merchant(sender)
+        parsed_data.update(data)
+        return _handle_subscription_charge(data, subject, sent_at=sent_at)
+
+    elif email_type in ("Purchase", "Receipt"):
+        data = parsers.parse_payment_amount(subject, body)
+        data["merchant"] = parsers.parse_merchant(sender)
+        parsed_data.update(data)
+        return _handle_merchant_purchase(data, subject, sent_at=sent_at)
+
+    elif email_type == "Other":
         return None
 
     return None
@@ -332,11 +347,13 @@ def _handle_sale(data: dict, sent_at=None, shoe_image=None):
             sale.purchase_cost = float(matched.purchase_cost) if matched.purchase_cost else None
             logger.info(f"FIFO matched sale #{order_number} → inventory_id={matched.inventory_id}")
 
-    # Same-day emails (Sale + Confirmation/Completed) may arrive out of order.
-    # If those emails were processed before this Sale was created, back-fill them now.
+    # Same-day emails (Sale + Confirmation/Completed/Cancelled) may arrive out
+    # of order. If those emails were processed before this Sale was created,
+    # back-fill them now.
     _apply_deferred_confirmation(sale, order_number)
     if sale_type == "Consignment":
         _apply_deferred_completion(sale, order_number)
+    _apply_deferred_cancellation(sale, order_number)
 
     db.session.commit()
     logger.info(f"Created Sale #{order_number} (sale_id={sale.sale_id})")
@@ -537,29 +554,13 @@ def _handle_wrong_size_sku_issue(sale: Sale):
     return "Sale", sale.sale_id
 
 
-def _handle_cancellation(data: dict):
-    """
-    Spec 4.3: Cancel sale, restore inventory.
-
-    Path A (Unconfirmed) — no fee.
-    Path B (Confirmed)   — create $10 expense record.
-
-    Note: Buyer-declined cancellations are now handled directly by the
-    second Attention Needed email ("buyer declined the discount") before
-    any Cancellation email arrives. If this handler finds an already-
-    Cancelled sale, skip gracefully.
-    """
-    sale = _find_sale(data.get("order_number"))
-    if not sale:
-        return None
-
-    # Already cancelled (e.g. buyer-declined Attention Needed email processed first)
+def apply_cancellation(sale: Sale, cancellation_type: str = "Unconfirmed", fee_amount=None) -> bool:
+    """Apply a cancellation to a sale (status, fields, inventory restore, fee
+    expense). Shared by the email handler, deferred back-fill, and the
+    stale-sale expiry maintenance. Does NOT commit. Returns True if the
+    status actually changed."""
     if not _set_sale_status_if_advanced(sale, "Cancelled"):
-        logger.info(f"Sale #{data.get('order_number')} already at or beyond Cancelled; no status change.")
-        return "Sale", sale.sale_id
-
-    cancellation_type = data.get("cancellation_type", "Unconfirmed")
-    fee_amount = data.get("fee_amount")
+        return False
 
     sale.cancellation_date = date_today()
     sale.cancellation_type = cancellation_type
@@ -585,9 +586,36 @@ def _handle_cancellation(data: dict):
         )
         db.session.add(expense)
         logger.info(f"Created cancellation fee expense for Order #{sale.order_number}")
+    return True
+
+
+def _handle_cancellation(data: dict):
+    """
+    Spec 4.3: Cancel sale, restore inventory.
+
+    Path A (Unconfirmed) — no fee.
+    Path B (Confirmed)   — create $10 expense record.
+
+    Note: Buyer-declined cancellations are now handled directly by the
+    second Attention Needed email ("buyer declined the discount") before
+    any Cancellation email arrives. If this handler finds an already-
+    Cancelled sale, skip gracefully.
+    """
+    sale = _find_sale(data.get("order_number"))
+    if not sale:
+        return None
+
+    changed = apply_cancellation(
+        sale,
+        cancellation_type=data.get("cancellation_type", "Unconfirmed"),
+        fee_amount=data.get("fee_amount"),
+    )
+    if not changed:
+        logger.info(f"Sale #{data.get('order_number')} already at or beyond Cancelled; no status change.")
 
     db.session.commit()
-    logger.info(f"Sale #{data.get('order_number')} → Cancelled ({cancellation_type})")
+    if changed:
+        logger.info(f"Sale #{data.get('order_number')} → Cancelled ({data.get('cancellation_type', 'Unconfirmed')})")
     return "Sale", sale.sale_id
 
 
@@ -605,6 +633,119 @@ def _handle_buyer_declined_no_reorder(sale: Sale):
     logger.info(f"Sale #{sale.order_number} -> Cancelled (Buyer Declined / Attention Needed)")
     return "Sale", sale.sale_id
 
+def _expense_amounts(data: dict):
+    """(amount_original, currency, amount_php, conversion_rate) from parsed data."""
+    from app.utils import get_php_estimate_rate
+    amount = data.get("amount")
+    currency = data.get("currency", "PHP")
+    if currency == "USD":
+        rate = get_php_estimate_rate()
+        return amount, "USD", amount * rate, rate
+    return amount, "PHP", amount, None
+
+
+def _month_after(d: date) -> date:
+    year, month = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+    try:
+        return d.replace(year=year, month=month)
+    except ValueError:  # e.g. Jan 31 -> Feb 28
+        return d.replace(year=year, month=month, day=28)
+
+
+def _handle_subscription_charge(data: dict, subject: str, sent_at=None):
+    """
+    Non-Alias subscription charge email (Netflix, Spotify, ...).
+    Creates an Expense (category=Subscription) and upserts the Subscription
+    master row so recurring burn is tracked.
+    """
+    if not data.get("amount"):
+        logger.info("Subscription email had no parseable amount — skipping record creation.")
+        return None
+
+    merchant = data.get("merchant") or "Unknown"
+    expense_date = (sent_at or now()).date()
+    amount_original, currency, amount_php, conversion_rate = _expense_amounts(data)
+
+    # Dedup: same merchant charged the same amount on the same day.
+    existing = Expense.query.filter_by(
+        category="Subscription", source=merchant, expense_date=expense_date,
+    ).filter(Expense.amount_original == amount_original).first()
+    if existing:
+        return "Expense", existing.expense_id
+
+    expense = Expense(
+        category="Subscription",
+        description=f"{merchant} subscription",
+        amount_original=amount_original,
+        original_currency=currency,
+        amount_php=amount_php,
+        conversion_rate=conversion_rate,
+        expense_date=expense_date,
+        source=merchant,
+        notes=str(subject or "")[:500],
+    )
+    db.session.add(expense)
+
+    subscription = Subscription.query.filter_by(name=merchant).first()
+    if subscription:
+        subscription.amount_original = amount_original
+        subscription.original_currency = currency
+        subscription.amount_php = amount_php
+        subscription.next_billing_date = _month_after(expense_date)
+        if subscription.status != "Active":
+            subscription.status = "Active"
+    else:
+        db.session.add(Subscription(
+            name=merchant,
+            amount_original=amount_original,
+            original_currency=currency,
+            amount_php=amount_php,
+            billing_cycle="Monthly",
+            next_billing_date=_month_after(expense_date),
+            status="Active",
+        ))
+
+    db.session.commit()
+    logger.info(f"Subscription charge recorded: {merchant} {currency} {amount_original}")
+    return "Expense", expense.expense_id
+
+
+def _handle_merchant_purchase(data: dict, subject: str, sent_at=None):
+    """
+    Non-Alias order/receipt email (Shopee, Lazada, Nike, ...).
+    Creates an Expense: Sneaker Purchase for sneaker merchants, else Personal Order.
+    """
+    if not data.get("amount"):
+        logger.info("Purchase/receipt email had no parseable amount — skipping record creation.")
+        return None
+
+    merchant = data.get("merchant") or "Unknown"
+    expense_date = (sent_at or now()).date()
+    amount_original, currency, amount_php, conversion_rate = _expense_amounts(data)
+    category = "Sneaker Purchase" if merchant in parsers.SNEAKER_MERCHANTS else "Personal Order"
+
+    existing = Expense.query.filter_by(
+        category=category, source=merchant, expense_date=expense_date,
+    ).filter(Expense.amount_original == amount_original).first()
+    if existing:
+        return "Expense", existing.expense_id
+
+    expense = Expense(
+        category=category,
+        description=str(subject or f"{merchant} order")[:500],
+        amount_original=amount_original,
+        original_currency=currency,
+        amount_php=amount_php,
+        conversion_rate=conversion_rate,
+        expense_date=expense_date,
+        source=merchant,
+    )
+    db.session.add(expense)
+    db.session.commit()
+    logger.info(f"{category} expense recorded: {merchant} {currency} {amount_original}")
+    return "Expense", expense.expense_id
+
+
 def _handle_bank_transfer(data: dict, sent_at=None):
     """
     Spec 4.5: Create BankTransfer record; auto-reconcile if possible.
@@ -618,11 +759,17 @@ def _handle_bank_transfer(data: dict, sent_at=None):
     # Use email sent date as the canonical transfer date
     transfer_date = sent_at or data.get("transfer_date") or now()
 
-    # Dedup: skip if a transfer with the same amount on the same day already exists
-    existing = BankTransfer.query.filter(
-        BankTransfer.amount_php == amount_php,
+    # Dedup: skip if a transfer with the same amount on the same day already
+    # exists. Compare in Python — Numeric vs float equality in SQL let exact
+    # duplicates slip through (several same-day duplicate pairs exist in the
+    # historical data because of this).
+    same_day = BankTransfer.query.filter(
         db.func.date(BankTransfer.transfer_date) == transfer_date.date(),
-    ).first()
+    ).all()
+    existing = next(
+        (t for t in same_day if abs(float(t.amount_php) - float(amount_php)) < 0.005),
+        None,
+    )
     if existing:
         logger.info(
             f"BankTransfer for ₱{amount_php} on {transfer_date.date()} already exists "
@@ -650,55 +797,107 @@ def _handle_bank_transfer(data: dict, sent_at=None):
     return "BankTransfer", transfer.transfer_id
 
 
-def _auto_reconcile_transfer(transfer: BankTransfer):
-    """
-    Spec 4.5 step 43: Match transfer to Completed sales by date proximity.
-
-    Strategy:
-    - Find Completed sales within the last 30 days not yet allocated to any transfer.
-    - If exactly one candidate: allocate 100% → Reconciled.
-    - If multiple candidates: flag Unreconciled for manual review.
-    """
-    window_start = (transfer.transfer_date - timedelta(days=30)).date()
-
+def _unallocated_completed_sales(before_date, window_days=45):
+    """Completed sales in the window before `before_date` that have earnings
+    and are not yet allocated to any transfer."""
+    window_start = (before_date - timedelta(days=window_days)).date()
     already_allocated_ids = {
         row[0] for row in db.session.query(BankTransferAllocation.sale_id).all()
     }
-
     candidates = (
         Sale.query
         .filter(Sale.status == "Completed")
+        .filter(Sale.completion_date != None)  # noqa: E711
         .filter(Sale.completion_date >= window_start)
+        .filter(Sale.completion_date <= before_date.date())
+        .filter(Sale.amount_made != None)  # noqa: E711
         .all()
     )
-    unallocated = [s for s in candidates if s.sale_id not in already_allocated_ids]
+    return [s for s in candidates if s.sale_id not in already_allocated_ids]
 
+
+def _auto_reconcile_transfer(transfer: BankTransfer):
+    """
+    Match a transfer to Completed sales by AMOUNT, not just date proximity.
+
+    Sales earn USD (`amount_made`); the payout arrives in PHP, so candidates
+    are compared via the configured USD→PHP estimate rate. Auto-allocation is
+    deliberately conservative — it only fires when exactly ONE sale matches
+    within ±2% and no second sale is even within ±5% (payouts covering several
+    sales are left for manual reconciliation, aided by the
+    /api/bank-transfers/<id>/suggestions endpoint).
+    """
+    from app.utils import get_php_estimate_rate
+
+    amount = float(transfer.amount_php)
+    unallocated = _unallocated_completed_sales(transfer.transfer_date)
     if not unallocated:
         logger.info(f"BankTransfer {transfer.transfer_id}: no unallocated completed sales — Unreconciled.")
         return
 
-    if len(unallocated) == 1:
-        allocation = BankTransferAllocation(
+    rate = get_php_estimate_rate()
+
+    def diff_pct(sale):
+        return abs(float(sale.amount_made) * rate - amount) / amount
+
+    tight = [s for s in unallocated if diff_pct(s) <= 0.02]
+    loose = [s for s in unallocated if diff_pct(s) <= 0.05]
+
+    match = None
+    if len(tight) == 1 and len(loose) == 1:
+        match = tight[0]
+    elif len(unallocated) == 1 and diff_pct(unallocated[0]) <= 0.10:
+        match = unallocated[0]
+
+    if match:
+        db.session.add(BankTransferAllocation(
             transfer_id=transfer.transfer_id,
-            sale_id=unallocated[0].sale_id,
+            sale_id=match.sale_id,
             allocated_amount=transfer.amount_php,
-        )
-        db.session.add(allocation)
+        ))
         transfer.reconciliation_status = "Reconciled"
         logger.info(
-            f"Auto-reconciled transfer {transfer.transfer_id} "
-            f"→ sale_id={unallocated[0].sale_id}"
+            f"Auto-reconciled transfer {transfer.transfer_id} → sale_id={match.sale_id} "
+            f"(${float(match.amount_made):.2f} × {rate} ≈ ₱{amount:,.2f})"
         )
     else:
         logger.info(
-            f"BankTransfer {transfer.transfer_id}: {len(unallocated)} candidate sales "
-            f"— manual reconciliation required."
+            f"BankTransfer {transfer.transfer_id}: {len(unallocated)} candidates, "
+            f"{len(tight)} within 2% — manual reconciliation required."
         )
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
+
+def _apply_deferred_cancellation(sale: Sale, order_number: int):
+    """
+    If a Cancellation email was processed before the Sale notification existed,
+    its log row sits with linked_record_id=None and the sale stays live forever
+    (the dashboard then shows phantom ship-deadline alerts). Apply it now.
+    """
+    try:
+        deferred_logs = (
+            EmailProcessingLog.query
+            .filter_by(email_type="Cancelled", linked_record_id=None)
+            .all()
+        )
+        for log in deferred_logs:
+            data = log.parsed_data or {}
+            if data.get("order_number") != order_number:
+                continue
+            apply_cancellation(
+                sale,
+                cancellation_type=data.get("cancellation_type", "Unconfirmed"),
+                fee_amount=data.get("fee_amount"),
+            )
+            log.linked_record_type = "Sale"
+            log.linked_record_id = sale.sale_id
+            logger.info(f"Applied deferred cancellation to sale #{order_number}")
+    except Exception:
+        logger.exception("Deferred cancellation application failed")
+
 
 def _apply_deferred_confirmation(sale: Sale, order_number: int):
     """

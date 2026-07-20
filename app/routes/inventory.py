@@ -374,6 +374,11 @@ def link_inventory_to_sale(inventory_id, sale_id):
     if item.status != "Available":
         return jsonify({"error": f"Inventory item is '{item.status}', must be 'Available' to link."}), 409
 
+    if sale.inventory_match_status == "Matched":
+        return jsonify({
+            "error": "Sale is already matched to an inventory item. Unmatch it first to relink."
+        }), 409
+
     item.status = "Sold"
     item.linked_sale_id = sale.sale_id
     sale.purchase_cost = float(item.purchase_cost) if item.purchase_cost else None

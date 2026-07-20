@@ -1,7 +1,10 @@
 import axios from 'axios'
 
 const client = axios.create({
-  baseURL: '/api',
+  // Same-origin '/api' by default (Vite dev proxy / co-located deploy). Set
+  // VITE_API_BASE (e.g. https://forda.tail580e35.ts.net/api) when the built
+  // app is served from a different origin than Flask.
+  baseURL: import.meta.env.VITE_API_BASE || '/api',
   headers: {
     'Content-Type': 'application/json',
     // Sent only when configured; the backend enforces it when API_KEY is set.
@@ -41,6 +44,13 @@ export const ensureShoeWithImage = (formData) => client.post('/shoes/ensure', fo
 // Barcode scanning
 export const lookupBarcode = (code) => client.get(`/barcodes/lookup/${encodeURIComponent(code)}`).then(r => r.data)
 export const confirmBarcodeAdd = (data) => client.post('/barcodes/confirm', data).then(r => r.data)
+
+// Push notifications
+export const getPushStatus = () => client.get('/push/status').then(r => r.data)
+export const getPushPublicKey = () => client.get('/push/public-key').then(r => r.data)
+export const subscribePush = (data) => client.post('/push/subscribe', data).then(r => r.data)
+export const unsubscribePush = (data) => client.post('/push/unsubscribe', data).then(r => r.data)
+export const sendTestPush = () => client.post('/push/test').then(r => r.data)
 
 // Bank Transfers
 export const getBankTransfers = (params = {}) => client.get('/bank-transfers', { params }).then(r => r.data)

@@ -37,6 +37,17 @@ Camera notes:
 - To scan **from a phone**, browsers require HTTPS: start the frontend with `VITE_HTTPS=1` (e.g. PowerShell: `$env:VITE_HTTPS='1'; npm run dev`) and open the `https://<LAN-IP>:5173` URL shown by Vite, accepting the self-signed certificate warning.
 - Photo upload works everywhere without HTTPS. Use JPG/PNG (browsers can't decode HEIC outside Safari).
 
+## Push Notifications
+
+Enable under **Settings → Push Notifications** ("Enable on this device"), then use "Send test notification" to verify. Notifications are sent by the backend's background poller:
+
+- **Lifecycle events** (as Alias emails are ingested): new sale, confirmed (with ship-by), shipped, completed/cash-out, buyer-accepted discount, cancelled (+fee), payout received (flagged when it couldn't auto-reconcile), attention-needed.
+- **Deadline alerts** (scanned every poll interval): sale pending >12h, shipment deadline at T-24h and T-6h, overdue shipment, and the attention-needed 48h auto-discount timer (on appearance and at T-6h).
+
+Each event/stage sends **once** — delivery is deduplicated in the `push_sent_log` table, so restarts and re-scrapes never double-notify.
+
+Setup: VAPID keys live in `.env` (`VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT`); push stays disabled until they're set. Delivery requires the site to be served over HTTPS with a certificate the phone trusts (e.g. `tailscale serve`) — the self-signed `VITE_HTTPS=1` cert is enough for the camera but **not** for push on phones. On iPhone, install the app to the Home Screen first (iOS only grants web push to installed PWAs).
+
 ## Tech Stack
 
 ### Backend

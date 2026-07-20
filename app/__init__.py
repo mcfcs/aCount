@@ -2,6 +2,9 @@
 aCount - Flask Application Factory
 """
 
+import hmac
+import os
+
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -24,6 +27,8 @@ def create_app(config_name="development"):
             raise RuntimeError("SECRET_KEY must be set to a strong, unique value in production.")
         if not app.config.get("SQLALCHEMY_DATABASE_URI"):
             raise RuntimeError("DATABASE_URL must be set in production.")
+        if not app.config.get("API_KEY"):
+            raise RuntimeError("API_KEY must be set in production — without it every /api endpoint is public.")
 
     # Initialize extensions
     db.init_app(app)
@@ -46,7 +51,11 @@ def create_app(config_name="development"):
         def _require_api_key():
             if request.method == "OPTIONS" or not request.path.startswith("/api/"):
                 return None
-            if request.headers.get("X-API-Key") != api_key:
+            # Shoe images are rendered via <img> tags, which cannot send the
+            # X-API-Key header; they are non-sensitive, so exempt GETs.
+            if request.method == "GET" and request.path.startswith("/api/shoes/image/"):
+                return None
+            if not hmac.compare_digest(request.headers.get("X-API-Key", ""), api_key):
                 return jsonify({"error": "Unauthorized"}), 401
     elif not app.config.get("TESTING"):
         app.logger.warning(
@@ -71,6 +80,7 @@ def create_app(config_name="development"):
     from app.routes.shoes import shoes_bp
     from app.routes.labels import labels_bp
     from app.routes.barcodes import barcodes_bp
+    from app.routes.push import push_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
@@ -85,6 +95,7 @@ def create_app(config_name="development"):
     app.register_blueprint(shoes_bp, url_prefix="/api/shoes")
     app.register_blueprint(labels_bp, url_prefix="/api/labels")
     app.register_blueprint(barcodes_bp, url_prefix="/api/barcodes")
+    app.register_blueprint(push_bp, url_prefix="/api/push")
 
     # JSON error responses so the API never returns HTML error pages.
     from werkzeug.exceptions import HTTPException
@@ -100,8 +111,13 @@ def create_app(config_name="development"):
         app.logger.exception("Unhandled application error")
         return jsonify({"error": "Internal server error"}), 500
 
-    # Start background Gmail poller (skip in testing)
-    if app.config.get("GMAIL_POLLER_ENABLED", True) and not app.config.get("TESTING"):
+    # Start background Gmail poller (skip in testing).
+    # In debug, the Werkzeug reloader runs two processes; only the serving
+    # child (WERKZEUG_RUN_MAIN=true) gets a poller — the parent starting one
+    # too caused duplicate polls (and would double-send push notifications).
+    # This also keeps `flask db ...` CLI invocations poller-free.
+    poller_process = (not app.debug) or os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    if app.config.get("GMAIL_POLLER_ENABLED", True) and not app.config.get("TESTING") and poller_process:
         from app.gmail.poller import start_background_poller
         start_background_poller(app)
 

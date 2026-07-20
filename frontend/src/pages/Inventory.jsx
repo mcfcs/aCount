@@ -60,9 +60,6 @@ function isWomensInventoryItem(row) {
   const name = String(row?.shoe_name || '')
   return /\bWmns\b/i.test(name) || /\bWomen's\b/i.test(name) || /\bWomens\b/i.test(name)
 }
-function isGsInventoryItem(row) {
-  return hasStandaloneToken(row?.shoe_name, 'GS')
-}
 function isPsTdInventoryItem(row) {
   return hasStandaloneToken(row?.shoe_name, 'PS') || hasStandaloneToken(row?.shoe_name, 'TD')
 }
@@ -470,9 +467,10 @@ export default function Inventory() {
       }
 
     } catch (err) {
+      if (reqId !== fetchReqId.current) return
       setError(err?.response?.data?.error || 'Failed to load inventory')
     } finally {
-      setLoading(false)
+      if (reqId === fetchReqId.current) setLoading(false)
     }
   }, [statusFilter, sizeFilter, sizeTypeFilter, activeView, shoeBrandFilter, debouncedSearch, inventoryPage, selectedSizeFilters, quickSizeMode, includeWomenSizes, psTdMode])
 
@@ -951,6 +949,9 @@ export default function Inventory() {
       const next = current.filter((id) => visibleIds.has(id))
       return next.length === current.length ? current : next
     })
+    // sellingRowIdsKey is a stable string proxy for sellingRows' id set — the
+    // only part of sellingRows this effect reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, sellingRowIdsKey])
 
   const formatSellingExportSizeLabel = (item, sizeBase = 'us') => {

@@ -1,16 +1,16 @@
 import mimetypes
 import os
-import urllib.request
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from flask import current_app
 from werkzeug.utils import secure_filename
 
-from app.utils import assert_safe_public_url
+from app.utils import fetch_public_url
 
 
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # per-image download cap (10 MB)
 CONTENT_TYPE_EXTENSION_MAP = {
     "image/jpeg": "jpg",
     "image/jpg": "jpg",
@@ -95,17 +95,11 @@ def save_shoe_image_from_url(url: str) -> str:
         raise ValueError("Image URL is required.")
 
     candidate_url = _extract_google_proxy_original_url(str(url).strip())
-    # Validates scheme AND blocks internal/SSRF targets (localhost, RFC1918, metadata IP).
-    parsed = assert_safe_public_url(candidate_url)
+    # SSRF-hardened: validates every redirect hop and caps the download size.
+    data, content_type = fetch_public_url(candidate_url, max_bytes=MAX_IMAGE_BYTES, timeout=20)
+    if not content_type.startswith("image/"):
+        raise ValueError("The provided URL did not return an image.")
 
-    request = urllib.request.Request(candidate_url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-        if not content_type.startswith("image/"):
-            raise ValueError("The provided URL did not return an image.")
-        data = response.read()
-        if not data:
-            raise ValueError("The provided image URL returned no data.")
-
-    filename = parsed.path.rsplit("/", 1)[-1] if parsed.path else ""
+    path = urlparse(candidate_url).path
+    filename = path.rsplit("/", 1)[-1] if path else ""
     return save_shoe_image_bytes(data, filename=filename, content_type=content_type)

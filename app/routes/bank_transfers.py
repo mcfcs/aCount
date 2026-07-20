@@ -239,6 +239,112 @@ def remove_allocation(transfer_id, allocation_id):
     return jsonify({"message": f"Allocation {allocation_id} removed."}), 200
 
 
+# ---- Reconciliation assist ------------------------------------------------
+
+@bank_transfers_bp.route("/<int:transfer_id>/suggestions", methods=["GET"])
+def allocation_suggestions(transfer_id):
+    """
+    GET /api/bank-transfers/<id>/suggestions
+    Ranked candidate sales for reconciling this transfer. Sales earn USD while
+    payouts arrive in PHP, so matches are estimated via the configured rate:
+    single sales closest to the amount, plus pair/greedy combos for batched
+    cash-outs.
+    """
+    transfer = db.session.get(BankTransfer, transfer_id)
+    if not transfer:
+        return jsonify({"error": "Bank transfer not found."}), 404
+
+    from app.gmail.processor import _unallocated_completed_sales
+    from app.utils import get_php_estimate_rate
+
+    rate = get_php_estimate_rate()
+    amount = float(transfer.amount_php)
+    candidates = _unallocated_completed_sales(transfer.transfer_date, window_days=60)
+
+    def entry(sale):
+        est = float(sale.amount_made) * rate
+        return {
+            "sale_id": sale.sale_id,
+            "order_number": sale.order_number,
+            "shoe_name": sale.shoe_name,
+            "completion_date": sale.completion_date.isoformat() if sale.completion_date else None,
+            "amount_usd": float(sale.amount_made),
+            "est_php": round(est, 2),
+            "diff_pct": round(abs(est - amount) / amount * 100, 2) if amount else None,
+        }
+
+    singles = sorted((entry(s) for s in candidates), key=lambda e: e["diff_pct"])
+    singles = [e for e in singles if e["diff_pct"] is not None and e["diff_pct"] <= 10][:10]
+
+    # Pair combos for batched payouts (cap the candidate pool for O(n^2)).
+    pool = sorted(candidates, key=lambda s: float(s.amount_made), reverse=True)[:120]
+    pairs = []
+    for i in range(len(pool)):
+        for j in range(i + 1, len(pool)):
+            est = (float(pool[i].amount_made) + float(pool[j].amount_made)) * rate
+            diff = abs(est - amount) / amount if amount else 1
+            if diff <= 0.02:
+                pairs.append({
+                    "sale_ids": [pool[i].sale_id, pool[j].sale_id],
+                    "order_numbers": [pool[i].order_number, pool[j].order_number],
+                    "est_php": round(est, 2),
+                    "diff_pct": round(diff * 100, 2),
+                })
+    pairs.sort(key=lambda e: e["diff_pct"])
+
+    # Greedy subset for larger batches.
+    greedy, total = [], 0.0
+    for sale in pool:
+        est = float(sale.amount_made) * rate
+        if total + est <= amount * 1.02:
+            greedy.append(sale)
+            total += est
+    greedy_combo = None
+    if amount and greedy and abs(total - amount) / amount <= 0.02 and len(greedy) > 2:
+        greedy_combo = {
+            "sale_ids": [s.sale_id for s in greedy],
+            "order_numbers": [s.order_number for s in greedy],
+            "est_php": round(total, 2),
+            "diff_pct": round(abs(total - amount) / amount * 100, 2),
+        }
+
+    return jsonify({
+        "transfer_id": transfer.transfer_id,
+        "amount_php": amount,
+        "rate_used": rate,
+        "candidates_in_window": len(candidates),
+        "singles": singles,
+        "pairs": pairs[:5],
+        "greedy_combo": greedy_combo,
+    }), 200
+
+
+@bank_transfers_bp.route("/duplicates", methods=["GET"])
+def duplicate_transfers():
+    """
+    GET /api/bank-transfers/duplicates
+    Same-day, same-amount transfer groups — likely double-ingested payout
+    emails (historical dedup compared Numeric to float and missed them).
+    Read-only report; deleting is the operator's call.
+    """
+    groups = {}
+    for t in BankTransfer.query.order_by(BankTransfer.transfer_date).all():
+        key = (t.transfer_date.date().isoformat(), round(float(t.amount_php), 2))
+        groups.setdefault(key, []).append(t)
+
+    duplicates = [
+        {
+            "transfer_date": key[0],
+            "amount_php": key[1],
+            "count": len(items),
+            "transfers": [t.to_dict() for t in items],
+        }
+        for key, items in groups.items() if len(items) > 1
+    ]
+    duplicates.sort(key=lambda g: g["transfer_date"])
+    return jsonify({"groups": duplicates, "total_extra_rows": sum(g["count"] - 1 for g in duplicates)}), 200
+
+
 # ---- Summary --------------------------------------------------------------
 
 @bank_transfers_bp.route("/summary", methods=["GET"])

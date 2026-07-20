@@ -316,22 +316,18 @@ def _candidate_from_html_image_src(src: str, cid_images: dict[str, dict]) -> dic
 
         for candidate_url in candidate_urls:
             try:
-                from app.utils import assert_safe_public_url
-                assert_safe_public_url(candidate_url)  # block SSRF (internal addresses)
-                request = urllib.request.Request(candidate_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-                    if not content_type.startswith("image/"):
-                        continue
-                    raw = response.read()
-                    if not raw:
-                        continue
-                    return {
-                        "filename": candidate_url.rsplit("/", 1)[-1],
-                        "content_type": content_type,
-                        "data": raw,
-                        "size": len(raw),
-                    }
+                from app.utils import fetch_public_url
+                # SSRF-hardened (validates redirect hops) + 10 MB cap; these
+                # URLs come from inbound email HTML, so treat as hostile.
+                raw, content_type = fetch_public_url(candidate_url, max_bytes=10 * 1024 * 1024, timeout=15)
+                if not content_type.startswith("image/"):
+                    continue
+                return {
+                    "filename": candidate_url.rsplit("/", 1)[-1],
+                    "content_type": content_type,
+                    "data": raw,
+                    "size": len(raw),
+                }
             except Exception as exc:
                 logger.warning(f"Could not download remote HTML image {candidate_url}: {exc}")
         return None
@@ -750,3 +746,79 @@ def parse_order_number_only(subject: str, body: str) -> dict:
             result["amount_made"] = float(usd_match.group(1).replace(",", ""))
 
     return result
+
+
+# =============================================================================
+# Generic payment parsing — Purchase / Receipt / Subscription emails
+# (Shopee, Lazada, Netflix, Spotify, ... — Spec 3.3 "not yet implemented" gap)
+# =============================================================================
+
+# ₱1,234.56 | PHP 1,234.56 | $9.99 | USD 9.99
+_PAYMENT_AMOUNT_RE = re.compile(
+    r'(?:(?P<php>₱|Php|PHP)|(?P<usd>\$|USD))\s*(?P<amount>[\d,]+(?:\.\d{1,2})?)'
+)
+# Lines like "Total: ₱1,234" carry the real charge; marketing amounts usually don't.
+_PAYMENT_KEYWORDS = (
+    "total", "amount", "paid", "charge", "payment", "billed", "bill", "price", "order summary",
+)
+
+_MERCHANT_NAMES = {
+    "shopee": "Shopee", "lazada": "Lazada", "netflix": "Netflix", "spotify": "Spotify",
+    "apple": "Apple", "google": "Google", "youtube": "YouTube", "canva": "Canva",
+    "notion": "Notion", "adobe": "Adobe", "microsoft": "Microsoft", "grab": "Grab",
+    "nike": "Nike", "adidas": "Adidas", "zalora": "Zalora",
+}
+
+# Merchants whose orders are sneaker stock rather than personal spending.
+SNEAKER_MERCHANTS = {"Nike", "Adidas"}
+
+
+def parse_merchant(sender: str) -> str:
+    """Derive a display merchant name from the From header."""
+    sender_lower = str(sender or "").lower()
+    for keyword, name in _MERCHANT_NAMES.items():
+        if keyword in sender_lower:
+            return name
+    match = re.search(r'@([a-z0-9-]+)\.', sender_lower)
+    if match:
+        return match.group(1).capitalize()
+    return "Unknown"
+
+
+def parse_payment_amount(subject: str, body: str) -> dict:
+    """Best-effort charge extraction from a merchant email.
+
+    Prefers amounts on lines containing payment keywords (Total/Amount/...),
+    falling back to the first currency-tagged amount anywhere. Returns
+    {"amount": float, "currency": "PHP"|"USD"} or {} when nothing parses.
+    """
+    text = f"{subject}\n{body or ''}"
+
+    def _match_to_result(match):
+        try:
+            amount = float(match.group("amount").replace(",", ""))
+        except (TypeError, ValueError):
+            return {}
+        if amount <= 0:
+            return {}
+        return {"amount": amount, "currency": "PHP" if match.group("php") else "USD"}
+
+    keyword_hits = []
+    for line in text.splitlines():
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in _PAYMENT_KEYWORDS):
+            for match in _PAYMENT_AMOUNT_RE.finditer(line):
+                result = _match_to_result(match)
+                if result:
+                    keyword_hits.append(result)
+    if keyword_hits:
+        # The largest keyworded amount is usually the order total (item lines
+        # are smaller; "Total" repeats the sum).
+        return max(keyword_hits, key=lambda r: r["amount"])
+
+    for match in _PAYMENT_AMOUNT_RE.finditer(text):
+        result = _match_to_result(match)
+        if result:
+            return result
+    return {}
+

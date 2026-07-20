@@ -95,6 +95,39 @@ class ProductBarcode(db.Model):
         }
 
 
+# ---------------------------------------------------------------------------
+# Web Push — browser subscriptions + sent-notification dedup
+# ---------------------------------------------------------------------------
+
+
+class PushSubscription(db.Model):
+    __tablename__ = "push_subscriptions"
+
+    subscription_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    endpoint = db.Column(db.Text, nullable=False, unique=True)
+    p256dh = db.Column(db.String(255), nullable=False)
+    auth = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=now)
+
+    def to_dict(self):
+        return {
+            "subscription_id": self.subscription_id,
+            "endpoint": self.endpoint,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class PushSentLog(db.Model):
+    """One row per notification actually sent — the unique dedup_key guarantees
+    each event/deadline-stage pushes at most once (poller restarts, re-scrapes,
+    and concurrent checks included)."""
+    __tablename__ = "push_sent_log"
+
+    sent_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    dedup_key = db.Column(db.String(255), nullable=False, unique=True)
+    sent_at = db.Column(db.DateTime, nullable=False, default=now)
+
+
 # Inventory (Section 5.1)
 # ---------------------------------------------------------------------------
 

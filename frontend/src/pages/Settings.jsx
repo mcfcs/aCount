@@ -1,8 +1,18 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import TopBar from '../components/layout/TopBar'
 
-import { scrapeEmails, resetDatabase } from '../services/api'
+import {
+  scrapeEmails, resetDatabase,
+  getPushStatus, getPushPublicKey, subscribePush, unsubscribePush, sendTestPush,
+} from '../services/api'
 import { readPhpEstimateRate, writePhpEstimateRate } from '../utils/exchangeRate'
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const raw = window.atob(base64)
+  return Uint8Array.from([...raw].map((ch) => ch.charCodeAt(0)))
+}
 
 const FIELD = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400'
 
@@ -26,6 +36,145 @@ function StatusPill({ tone = 'blue', children }) {
     <div className={`inline-flex rounded-lg border px-3 py-2 text-sm ${map[tone]}`}>
       {children}
     </div>
+  )
+}
+
+function PushNotificationsCard() {
+  const supported = typeof window !== 'undefined'
+    && window.isSecureContext
+    && 'serviceWorker' in navigator
+    && 'PushManager' in window
+    && 'Notification' in window
+
+  const [serverStatus, setServerStatus] = useState(null)
+  const [subscribed, setSubscribed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [info, setInfo] = useState('')
+
+  useEffect(() => {
+    getPushStatus().then(setServerStatus).catch(() => setServerStatus(null))
+    if (!supported) return
+    navigator.serviceWorker.ready
+      .then((reg) => reg.pushManager.getSubscription())
+      .then((sub) => setSubscribed(Boolean(sub)))
+      .catch(() => {})
+  }, [supported])
+
+  const enable = async () => {
+    setBusy(true)
+    setError('')
+    setInfo('')
+    try {
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        setError('Notification permission was denied. Allow notifications for this site in the browser settings.')
+        return
+      }
+      const { public_key: publicKey } = await getPushPublicKey()
+      const registration = await navigator.serviceWorker.ready
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      })
+      await subscribePush(subscription.toJSON())
+      setSubscribed(true)
+      setInfo('This device will now receive aCount notifications.')
+      getPushStatus().then(setServerStatus).catch(() => {})
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Could not enable notifications on this device.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const disable = async () => {
+    setBusy(true)
+    setError('')
+    setInfo('')
+    try {
+      const registration = await navigator.serviceWorker.ready
+      const subscription = await registration.pushManager.getSubscription()
+      if (subscription) {
+        await unsubscribePush({ endpoint: subscription.endpoint })
+        await subscription.unsubscribe()
+      }
+      setSubscribed(false)
+      setInfo('Notifications disabled on this device.')
+      getPushStatus().then(setServerStatus).catch(() => {})
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Could not disable notifications.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const test = async () => {
+    setBusy(true)
+    setError('')
+    setInfo('')
+    try {
+      const result = await sendTestPush()
+      setInfo(`Test notification sent to ${result.sent} device${result.sent === 1 ? '' : 's'}.`)
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Test send failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title="Push Notifications">
+      <p className="text-sm leading-relaxed text-gray-600">
+        Get notified about new sales, confirmations with ship-by deadlines, completed cash-outs,
+        payouts, and time-critical alerts (attention-needed 48h timer, shipment deadlines) — even
+        when the app is closed. Enable per device; on iPhone, add the app to the Home Screen first.
+      </p>
+      {!supported && (
+        <StatusPill tone="red">
+          This browser/context doesn&apos;t support push. It needs HTTPS (or localhost) and a modern browser.
+        </StatusPill>
+      )}
+      {supported && serverStatus && !serverStatus.configured && (
+        <StatusPill tone="red">Server push is not configured — set the VAPID keys in .env and restart the backend.</StatusPill>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        {!subscribed ? (
+          <button
+            type="button"
+            onClick={enable}
+            disabled={busy || !supported}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {busy ? 'Working…' : 'Enable on this device'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={disable}
+            disabled={busy}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {busy ? 'Working…' : 'Disable on this device'}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={test}
+          disabled={busy || !serverStatus?.configured || (serverStatus?.subscriptions ?? 0) === 0}
+          className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+        >
+          Send test notification
+        </button>
+        {serverStatus && (
+          <span className="text-xs text-gray-500">
+            {serverStatus.subscriptions} device{serverStatus.subscriptions === 1 ? '' : 's'} subscribed
+          </span>
+        )}
+      </div>
+      {info && <StatusPill tone="green">{info}</StatusPill>}
+      {error && <StatusPill tone="red">{error}</StatusPill>}
+    </Card>
   )
 }
 
@@ -156,6 +305,8 @@ export default function Settings() {
             </p>
           </div>
         </Card>
+
+        <PushNotificationsCard />
 
         <Card title="Gmail Date Range Scrape">
           <form onSubmit={handleScrape} className="space-y-4">

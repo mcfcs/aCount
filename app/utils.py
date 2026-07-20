@@ -2,7 +2,9 @@
 
 import ipaddress
 import socket
-from urllib.parse import urlparse
+import urllib.error
+import urllib.request
+from urllib.parse import urljoin, urlparse
 
 
 def get_php_estimate_rate(default: float = 56.0) -> float:
@@ -64,3 +66,47 @@ def assert_safe_public_url(url):
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             raise ValueError("URL points to a disallowed (internal) address.")
     return parsed
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    # Turn every redirect into the HTTPError urllib raises for unhandled 3xx,
+    # so fetch_public_url can re-validate the target before following it.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def fetch_public_url(url, *, max_bytes, timeout=20, user_agent="Mozilla/5.0", max_redirects=3):
+    """SSRF-hardened download: every redirect hop is re-validated against
+    ``assert_safe_public_url`` (plain ``urlopen`` follows redirects after only
+    the first URL was checked) and the body is capped at ``max_bytes``.
+
+    Returns ``(data, content_type)``; raises ``ValueError`` on unsafe target,
+    redirect loop, oversize, or empty body. Network errors propagate.
+    """
+    current = str(url or "").strip()
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+
+    for _ in range(max_redirects + 1):
+        assert_safe_public_url(current)
+        request = urllib.request.Request(current, headers={"User-Agent": user_agent})
+        try:
+            response = opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                location = exc.headers.get("Location") if exc.headers else None
+                exc.close()
+                if not location:
+                    raise ValueError("Redirect response without a Location header.")
+                current = urljoin(current, location)
+                continue
+            raise
+        with response:
+            content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError(f"Download exceeds the {max_bytes // (1024 * 1024)} MB limit.")
+        if not data:
+            raise ValueError("The URL returned no data.")
+        return data, content_type
+
+    raise ValueError("Too many redirects.")

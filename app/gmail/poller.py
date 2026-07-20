@@ -21,6 +21,7 @@ from app.gmail.auth import get_gmail_service
 from app.gmail.parsers import get_message_parts, extract_largest_image_part, extract_shipping_label_url
 from app.gmail.processor import process_message
 from app.gmail.classifier import classify_email
+from app.push_events import notify_email_event
 from googleapiclient.errors import HttpError
 from app.time_utils import now
 
@@ -142,6 +143,10 @@ def poll_once(app) -> dict:
                 shipping_label_url = extract_shipping_label_url(full_msg) if email_type == "Confirmation" else None
                 result = process_message(msg_id, subject, sender, body, sent_at=sent_at, shoe_image=shoe_image, shipping_label_url=shipping_label_url)
                 results.append(result)
+
+                # Tier-2 lifecycle push (new sale / confirmed / shipped / ...).
+                # Deduped by Gmail message id; no-op when push is unconfigured.
+                notify_email_event(msg_id, result)
 
                 if result.get("status") != "skipped":
                     processed += 1
@@ -794,6 +799,22 @@ def start_background_poller(app):
                 poll_once(app)
             except Exception as e:
                 logger.exception(f"Unexpected error in poll loop: {e}")
+            # Lifecycle maintenance BEFORE alert pushes, so freshly expired /
+            # back-filled-cancelled sales never generate phantom deadline pushes.
+            try:
+                from app.sale_maintenance import run_lifecycle_maintenance
+                with app.app_context():
+                    run_lifecycle_maintenance()
+            except Exception as e:
+                logger.exception(f"Lifecycle maintenance failed: {e}")
+            # Tier-1 deadline pushes run on the same cadence, independently of
+            # Gmail auth (poll_once may bail early without credentials).
+            try:
+                from app.push_events import check_alert_pushes
+                with app.app_context():
+                    check_alert_pushes()
+            except Exception as e:
+                logger.exception(f"Alert push check failed: {e}")
             _stop_event.wait(interval)
         logger.info("Gmail poller stopped.")
 

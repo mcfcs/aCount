@@ -37,7 +37,7 @@ export default function ActionItems({ alerts = [], loading = false, error = null
   const hasItems = Object.keys(grouped).length > 0
 
   return (
-    <div className="space-y-4">
+    <div className="max-h-[30rem] space-y-4 overflow-y-auto overflow-x-hidden pr-1">
       {!hasItems && <EmptyState title="No action items" message="All caught up!" />}
       {urgencyOrder.map(urgency => {
         const items = grouped[urgency]
@@ -54,8 +54,8 @@ export default function ActionItems({ alerts = [], loading = false, error = null
                   className={`rounded-lg border-l-4 p-3 ${borderColors[urgency] || 'border-gray-300 bg-gray-50'}`}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <p className="text-sm text-gray-800">{alert.message}</p>
-                    <AlertBadge urgency={urgency} />
+                    <p className="min-w-0 break-words text-sm text-gray-800">{alert.message}</p>
+                    <span className="shrink-0"><AlertBadge urgency={urgency} /></span>
                   </div>
                   {alert.type && (
                     <p className="mt-1 text-xs text-gray-500">Type: {alert.type}</p>

@@ -270,10 +270,13 @@ def _fifo_match(sku, size):
     Match by SKU + Size + Status=Available, earliest DatePurchased first.
     Returns the matched Inventory item or None.
     """
+    # Row lock so concurrent matchers (API + Gmail poller) can't both claim the
+    # same pair; deterministic tie-break for same-day bulk purchases.
     return (
         Inventory.query
         .filter_by(sku=sku, size=size, status="Available")
-        .order_by(Inventory.date_purchased.asc())
+        .order_by(Inventory.date_purchased.asc(), Inventory.inventory_id.asc())
+        .with_for_update(skip_locked=True)
         .first()
     )
 
