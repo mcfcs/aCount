@@ -90,36 +90,49 @@ def set_php_rate():
         return jsonify({"error": f"Failed to save PHP estimate rate: {str(exc)}"}), 500
 
 
-PUSH_LIFECYCLE_SETTING_KEY = "push_lifecycle"
-
-
 @settings_bp.get("/push-prefs")
 def get_push_prefs():
-    """GET /api/settings/push-prefs — notification preferences.
+    """GET /api/settings/push-prefs — per-category notification preferences.
 
-    `lifecycle_push`: whether routine per-email pushes (new sale / confirmed /
-    shipped / …) fire. Off by default; exception pushes (sold-with-no-inventory,
-    unreconciled payout, attention, deadlines, sold-at-a-loss) always fire.
+    Returns each category's current enabled state plus its label/description so
+    the UI can render the toggle list. Categories with no stored value use their
+    default (exceptions on, routine lifecycle off).
     """
-    setting = AppSetting.query.get(PUSH_LIFECYCLE_SETTING_KEY)
-    enabled = bool(setting and setting.value is not None and float(setting.value) >= 1)
-    return jsonify({"lifecycle_push": enabled}), 200
+    from app.push_utils import NOTIFICATION_PREFS, get_notification_prefs
+
+    return jsonify({
+        "prefs": get_notification_prefs(),
+        "options": [
+            {"key": p["key"], "label": p["label"], "description": p["description"], "default": p["default"]}
+            for p in NOTIFICATION_PREFS
+        ],
+    }), 200
 
 
 @settings_bp.put("/push-prefs")
 def set_push_prefs():
-    """PUT /api/settings/push-prefs  Body: { "lifecycle_push": true|false }"""
+    """PUT /api/settings/push-prefs — update one or more categories.
+
+    Body: { "<category_key>": true|false, ... } (partial updates allowed).
+    Unknown keys are ignored. Returns the full resolved preference map.
+    """
+    from app.push_utils import NOTIFICATION_PREFS, get_notification_prefs, pref_setting_key
+
     data = request.get_json(silent=True) or {}
-    value = 1 if data.get("lifecycle_push") else 0
+    valid_keys = {p["key"] for p in NOTIFICATION_PREFS}
     try:
-        setting = AppSetting.query.get(PUSH_LIFECYCLE_SETTING_KEY)
-        if setting is None:
-            setting = AppSetting(key=PUSH_LIFECYCLE_SETTING_KEY, value=value)
-            db.session.add(setting)
-        else:
-            setting.value = value
+        for key, raw in data.items():
+            if key not in valid_keys:
+                continue
+            value = 1 if raw else 0
+            setting_key = pref_setting_key(key)
+            setting = AppSetting.query.get(setting_key)
+            if setting is None:
+                db.session.add(AppSetting(key=setting_key, value=value))
+            else:
+                setting.value = value
         db.session.commit()
-        return jsonify({"lifecycle_push": bool(value)}), 200
+        return jsonify({"prefs": get_notification_prefs()}), 200
     except Exception as exc:
         db.session.rollback()
         return jsonify({"error": f"Failed to save push preferences: {str(exc)}"}), 500

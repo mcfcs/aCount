@@ -74,12 +74,16 @@ function PushNotificationsCard() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
-  const [lifecycleOn, setLifecycleOn] = useState(false)
-  const [prefBusy, setPrefBusy] = useState(false)
+  const [prefs, setPrefs] = useState({})
+  const [prefOptions, setPrefOptions] = useState([])
+  const [savingKey, setSavingKey] = useState(null)
 
   useEffect(() => {
     getPushStatus().then(setServerStatus).catch(() => setServerStatus(null))
-    getPushPrefs().then((p) => setLifecycleOn(Boolean(p?.lifecycle_push))).catch(() => {})
+    getPushPrefs().then((d) => {
+      setPrefs(d?.prefs || {})
+      setPrefOptions(d?.options || [])
+    }).catch(() => {})
     if (!supported) return
     navigator.serviceWorker.ready
       .then((reg) => reg.pushManager.getSubscription())
@@ -87,16 +91,18 @@ function PushNotificationsCard() {
       .catch(() => {})
   }, [supported])
 
-  const toggleLifecycle = async (next) => {
-    setPrefBusy(true)
+  const togglePref = async (key, next) => {
+    setSavingKey(key)
     setError('')
+    setPrefs((prev) => ({ ...prev, [key]: next }))  // optimistic
     try {
-      const res = await setPushPrefs({ lifecycle_push: next })
-      setLifecycleOn(Boolean(res?.lifecycle_push))
+      const res = await setPushPrefs({ [key]: next })
+      if (res?.prefs) setPrefs(res.prefs)
     } catch (err) {
+      setPrefs((prev) => ({ ...prev, [key]: !next }))  // revert on failure
       setError(err?.response?.data?.error || 'Could not save notification preference.')
     } finally {
-      setPrefBusy(false)
+      setSavingKey(null)
     }
   }
 
@@ -165,28 +171,34 @@ function PushNotificationsCard() {
   return (
     <Card title="Push Notifications">
       <p className="text-sm leading-relaxed text-gray-600">
-        aCount pushes <strong>exceptions only</strong> by default — things no other app can tell you:
-        a sale with no matching inventory, a sale set to close at a loss, a payout that wouldn't
-        auto-reconcile, earnings awaiting payout, and time-critical deadlines (attention-needed 48h
-        timer, shipment deadlines). Enable per device; on iPhone, add the app to the Home Screen first.
+        aCount pushes <strong>exceptions</strong> — things no other app can tell you: a sale with no
+        matching inventory, a sale set to close at a loss, a payout that wouldn't auto-reconcile,
+        earnings awaiting payout, and time-critical deadlines. Toggle any category below. Enable per
+        device; on iPhone, add the app to the Home Screen first.
       </p>
 
-      <label className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
-        <input
-          type="checkbox"
-          checked={lifecycleOn}
-          disabled={prefBusy}
-          onChange={(e) => toggleLifecycle(e.target.checked)}
-          className="mt-0.5"
-        />
-        <span className="text-sm text-gray-700">
-          <span className="font-medium">Also send routine lifecycle notifications</span>
-          <span className="block text-xs text-gray-500">
-            New sale / confirmed / shipped / completed / cancelled — one per email. Off by default
-            because Alias and Gmail already notify these. {prefBusy && '· saving…'}
-          </span>
-        </span>
-      </label>
+      {prefOptions.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Which notifications to send</p>
+          {prefOptions.map((opt) => (
+            <label key={opt.key} className="flex items-start justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
+              <span className="text-sm text-gray-700">
+                <span className="font-medium">{opt.label}</span>
+                <span className="block text-xs text-gray-500">
+                  {opt.description}{savingKey === opt.key && ' · saving…'}
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={Boolean(prefs[opt.key])}
+                disabled={savingKey === opt.key}
+                onChange={(e) => togglePref(opt.key, e.target.checked)}
+                className="mt-0.5 shrink-0"
+              />
+            </label>
+          ))}
+        </div>
+      )}
       {!supported && diag.reasons.map((reason) => (
         <StatusPill key={reason} tone="red">{reason}</StatusPill>
       ))}

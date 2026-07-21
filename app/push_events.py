@@ -12,28 +12,16 @@ Two sources, both driven from the Gmail poller thread:
 import logging
 
 from app.alerts import build_alerts
-from app.models.models import AppSetting, BankTransfer, Sale
-from app.push_utils import notify_once, prune_sent_log, push_configured
+from app.models.models import BankTransfer, Sale
+from app.push_utils import get_notification_prefs, notify_once, prune_sent_log, push_configured
 
 logger = logging.getLogger(__name__)
 
 # Email types that never warrant a push.
 _SILENT_EMAIL_TYPES = {"Purchase", "Receipt", "Subscription", "Other", None, ""}
 
-# Routine per-email lifecycle pushes (new sale / confirmed / shipped / …)
-# duplicate what Alias + Gmail already notify, so they are OFF by default and
-# gated behind this setting. Exception pushes — sold-with-no-inventory-match,
-# unreconciled payout, attention-needed — always fire regardless.
-LIFECYCLE_SETTING_KEY = "push_lifecycle"
-
-
-def lifecycle_push_enabled() -> bool:
-    """Whether routine per-email lifecycle pushes are enabled (default False)."""
-    try:
-        setting = AppSetting.query.get(LIFECYCLE_SETTING_KEY)
-        return bool(setting and setting.value is not None and float(setting.value) >= 1)
-    except Exception:
-        return False
+# Each push is gated by a category in the operator's notification preferences
+# (Settings → Push). Exception categories default ON; routine lifecycle OFF.
 
 
 def _sale_label(sale):
@@ -66,7 +54,8 @@ def notify_email_event(gmail_message_id, result):
         dedup_key = f"evt:{gmail_message_id}"
         record_type = result.get("record_type")
         record_id = result.get("record_id")
-        lifecycle_on = lifecycle_push_enabled()
+        prefs = get_notification_prefs()
+        lifecycle_on = prefs["lifecycle"]
 
         if record_type == "BankTransfer" and record_id:
             transfer = BankTransfer.query.get(record_id)
@@ -74,10 +63,10 @@ def notify_email_event(gmail_message_id, result):
                 return
             amount = _money(transfer.amount_php, "₱")
             if transfer.reconciliation_status != "Reconciled":
-                # EXCEPTION: a payout landed but couldn't auto-match — always push.
-                notify_once(dedup_key, f"Payout unreconciled: {amount}",
-                            "Couldn't auto-match sales to this payout — reconcile it manually.",
-                            url="/financial", tag="transfer")
+                if prefs["payouts"]:
+                    notify_once(dedup_key, f"Payout unreconciled: {amount}",
+                                "Couldn't auto-match sales to this payout — reconcile it manually.",
+                                url="/financial", tag="transfer")
             elif lifecycle_on:
                 rate = f" at ≈₱{float(transfer.implied_rate):.1f}/$" if transfer.implied_rate else ""
                 notify_once(dedup_key, f"Payout reconciled: {amount}",
@@ -94,24 +83,23 @@ def notify_email_event(gmail_message_id, result):
 
         if email_type == "Sale":
             if sale.inventory_match_status != "Matched":
-                # EXCEPTION: sold something with no matching stock — always push.
-                # (Oversell, untracked pair, or missing cost basis.)
-                notify_once(f"nomatch:{sale.sale_id}", f"Sold, no inventory match: {label}",
-                            f"No available stock for SKU {sale.sku or '?'} size {sale.size:g} — "
-                            "add/link inventory or check for an oversell.",
-                            url="/sales", tag="nomatch")
+                if prefs["no_inventory"]:
+                    notify_once(f"nomatch:{sale.sale_id}", f"Sold, no inventory match: {label}",
+                                f"No available stock for SKU {sale.sku or '?'} size {sale.size:g} — "
+                                "add/link inventory or check for an oversell.",
+                                url="/sales", tag="nomatch")
             elif lifecycle_on:
                 price = _money(sale.selling_price)
                 notify_once(dedup_key, f"New sale: {label}",
                             (f"Sold for {price}. " if price else "") + "Confirm within 24h.",
                             url="/sales", tag="sale")
         elif email_type == "Attention":
-            # EXCEPTION: time-critical action — always push.
-            deadline = sale.attention_needed_deadline.strftime("%b %d, %H:%M") if sale.attention_needed_deadline else None
-            notify_once(dedup_key, f"Needs attention: {label}",
-                        (sale.issue_type or "Issue reported")
-                        + (f" — respond before {deadline} (auto-discount)." if deadline else " — action required."),
-                        url="/sales", tag="attention")
+            if prefs["attention"]:
+                deadline = sale.attention_needed_deadline.strftime("%b %d, %H:%M") if sale.attention_needed_deadline else None
+                notify_once(dedup_key, f"Needs attention: {label}",
+                            (sale.issue_type or "Issue reported")
+                            + (f" — respond before {deadline} (auto-discount)." if deadline else " — action required."),
+                            url="/sales", tag="attention")
         elif lifecycle_on and email_type == "Confirmation":
             ship_by = sale.shipment_deadline.strftime("%b %d, %H:%M") if sale.shipment_deadline else None
             notify_once(dedup_key, f"Confirmed: {label}",
@@ -150,45 +138,53 @@ def check_alert_pushes():
     try:
         if not push_configured():
             return
+        prefs = get_notification_prefs()
         for item in build_alerts():
             alert_type = item.get("type")
             if alert_type == "pending_confirmation":
-                notify_once(f"pend:{item['sale_id']}",
-                            "Sale pending too long",
-                            item["message"], url="/sales", tag="deadline")
+                if prefs["deadlines"]:
+                    notify_once(f"pend:{item['sale_id']}",
+                                "Sale pending too long",
+                                item["message"], url="/sales", tag="deadline")
             elif alert_type == "shipment_deadline":
-                bucket = "t6" if (item.get("hours_left") is not None and item["hours_left"] <= 6) else "t24"
-                notify_once(f"shipdl:{item['sale_id']}:{bucket}",
-                            "Shipment deadline" + (" — under 6h!" if bucket == "t6" else " approaching"),
-                            item["message"], url="/labels", tag="deadline")
+                if prefs["deadlines"]:
+                    bucket = "t6" if (item.get("hours_left") is not None and item["hours_left"] <= 6) else "t24"
+                    notify_once(f"shipdl:{item['sale_id']}:{bucket}",
+                                "Shipment deadline" + (" — under 6h!" if bucket == "t6" else " approaching"),
+                                item["message"], url="/labels", tag="deadline")
             elif alert_type == "overdue_shipment":
-                notify_once(f"shipov:{item['sale_id']}",
-                            "Shipment OVERDUE",
-                            item["message"], url="/labels", tag="deadline")
+                if prefs["deadlines"]:
+                    notify_once(f"shipov:{item['sale_id']}",
+                                "Shipment OVERDUE",
+                                item["message"], url="/labels", tag="deadline")
             elif alert_type == "attention_needed":
-                notify_once(f"attn:{item['sale_id']}",
-                            "Sale needs attention",
-                            item["message"], url="/sales", tag="attention")
-                hours = item.get("hours_until_auto_discount")
-                if hours is not None and 0 < hours <= 6:
-                    notify_once(f"attn6:{item['sale_id']}",
-                                "Auto-discount in under 6h",
+                if prefs["attention"]:
+                    notify_once(f"attn:{item['sale_id']}",
+                                "Sale needs attention",
                                 item["message"], url="/sales", tag="attention")
+                    hours = item.get("hours_until_auto_discount")
+                    if hours is not None and 0 < hours <= 6:
+                        notify_once(f"attn6:{item['sale_id']}",
+                                    "Auto-discount in under 6h",
+                                    item["message"], url="/sales", tag="attention")
             # --- Derived-exception pushes: signals only aCount can compute ---
             elif alert_type == "sold_at_loss":
-                notify_once(f"loss:{item['sale_id']}",
-                            "Sold at a loss",
-                            item["message"], url="/sales", tag="loss")
+                if prefs["loss"]:
+                    notify_once(f"loss:{item['sale_id']}",
+                                "Sold at a loss",
+                                item["message"], url="/sales", tag="loss")
             elif alert_type == "earnings_awaiting_payout":
-                # Re-fires only when the backlog changes materially (count +
-                # rounded total in the key), so a steady backlog won't spam.
-                key = f"await:{item['sale_count']}:{int(item['est_total_php'])}"
-                notify_once(key, "Earnings awaiting payout",
-                            item["message"], url="/financial", tag="payout")
+                if prefs["payouts"]:
+                    # Re-fires only when the backlog changes materially (count +
+                    # rounded total in the key), so a steady backlog won't spam.
+                    key = f"await:{item['sale_count']}:{int(item['est_total_php'])}"
+                    notify_once(key, "Earnings awaiting payout",
+                                item["message"], url="/financial", tag="payout")
             elif alert_type == "unmatched_sale":
-                notify_once(f"nomatch7:{item['sale_id']}",
-                            "Sale still has no inventory match",
-                            item["message"], url="/sales", tag="nomatch")
+                if prefs["no_inventory"]:
+                    notify_once(f"nomatch7:{item['sale_id']}",
+                                "Sale still has no inventory match",
+                                item["message"], url="/sales", tag="nomatch")
             # unreconciled_transfer / consignment_expiry stay dashboard-only
             # (the unreconciled payout already pushed once at ingest).
         prune_sent_log()
